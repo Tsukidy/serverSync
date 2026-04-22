@@ -36,3 +36,63 @@ function ConvertFrom-RobocopyExitCode {
         Description = $description
     }
 }
+
+function Build-RobocopyArgs {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][int]$Threads,
+        [Parameter(Mandatory)][int]$Retries,
+        [Parameter(Mandatory)][int]$RetryWaitSeconds,
+        [Parameter(Mandatory)][string]$LogFile,
+        [string[]]$ExtraFlags = @()
+    )
+
+    $robocopyArgs = @(
+        $Source
+        $Destination
+        '/E'
+        '/Z'
+        '/COPY:DAT'
+        '/XO'
+        "/R:$Retries"
+        "/W:$RetryWaitSeconds"
+        "/MT:$Threads"
+        '/NP'
+        "/LOG+:$LogFile"
+    )
+    if ($ExtraFlags) { $robocopyArgs += $ExtraFlags }
+    return ,$robocopyArgs
+}
+
+function Invoke-RobocopySync {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][int]$Threads,
+        [Parameter(Mandatory)][int]$Retries,
+        [Parameter(Mandatory)][int]$RetryWaitSeconds,
+        [Parameter(Mandatory)][string]$LogFile,
+        [string[]]$ExtraFlags = @()
+    )
+
+    if (-not (Test-Path -Path $Destination -PathType Container)) {
+        if ($PSCmdlet.ShouldProcess($Destination, 'Create destination directory')) {
+            New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        }
+    }
+
+    $robocopyArgs = Build-RobocopyArgs -Source $Source -Destination $Destination `
+        -Threads $Threads -Retries $Retries -RetryWaitSeconds $RetryWaitSeconds `
+        -LogFile $LogFile -ExtraFlags $ExtraFlags
+
+    if ($PSCmdlet.ShouldProcess("$Source -> $Destination", 'robocopy')) {
+        $process = Start-Process -FilePath 'robocopy' -ArgumentList $robocopyArgs -Wait -PassThru -NoNewWindow
+        return (ConvertFrom-RobocopyExitCode -ExitCode $process.ExitCode)
+    }
+    else {
+        return [PSCustomObject]@{ ExitCode = 0; Success = $true; HasWarnings = $false; Description = '[WhatIf] skipped' }
+    }
+}
