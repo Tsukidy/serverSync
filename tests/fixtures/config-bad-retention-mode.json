@@ -1,0 +1,11 @@
+{
+  "network": { "nics": ["Ethernet"], "ready_timeout_seconds": 30, "ready_check_host": "192.168.1.1" },
+  "robocopy": { "threads": 6, "retries": 3, "retry_wait_seconds": 10, "extra_flags": [] },
+  "retention": { "default_mode": "files", "default_extensions": [".TIB"], "default_count": 3 },
+  "logging": { "log_directory": "C:\\logs", "log_retention_days": 90, "event_log_source": "ServerSync" },
+  "email": { "enabled": false, "smtp_server": "", "smtp_port": 25, "use_ssl": false, "credential_target": "", "from": "", "to": [], "send_on": "failure" },
+  "folder_pairs": [
+    { "name": "A", "source": "\\\\s\\share", "destination": "D:\\d", "credential_target": "t",
+      "retention": { "mode": "bogus", "count": 3 } }
+  ]
+}

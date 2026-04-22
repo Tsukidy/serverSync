@@ -1,0 +1,191 @@
+<#
+.SYNOPSIS
+    ServerSync orchestrator. Enables NICs, runs configured sync pairs, disables NICs.
+.DESCRIPTION
+    Intended for Task Scheduler. Accepts -Tag to filter pairs. Supports -WhatIf and
+    -ValidateConfig.
+.PARAMETER ConfigPath
+    Path to config.json. Default: ..\config\config.json relative to this script.
+.PARAMETER Tag
+    Optional. When provided, only pairs tagged with this value run.
+.PARAMETER ValidateConfig
+    Load and validate the config, then exit. No sync performed.
+#>
+
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [string]$ConfigPath,
+    [string]$Tag,
+    [switch]$ValidateConfig
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Resolve default config path
+if (-not $ConfigPath) {
+    $ConfigPath = Join-Path $PSScriptRoot '..' 'config' 'config.json'
+}
+
+# Load modules (dot-source)
+$modulesDir = Join-Path $PSScriptRoot 'Modules'
+. (Join-Path $modulesDir 'ConfigLoader.ps1')
+. (Join-Path $modulesDir 'Logging.ps1')
+. (Join-Path $modulesDir 'NetworkControl.ps1')
+. (Join-Path $modulesDir 'SyncOperations.ps1')
+. (Join-Path $modulesDir 'Retention.ps1')
+
+# Load & validate config
+$config = Read-ServerSyncConfig -Path $ConfigPath
+$validation = Test-ServerSyncConfig -Config $config
+if (-not $validation.Valid) {
+    Write-Error "Config invalid:`n$($validation.Errors -join "`n")"
+    exit 2
+}
+
+if ($ValidateConfig) {
+    Write-Host "Config OK: $ConfigPath"
+    exit 0
+}
+
+# Initialize logging
+$logger = New-ServerSyncLogger -LogDirectory $config.logging.log_directory `
+                                -Prefix 'sync' `
+                                -EventLogSource $config.logging.event_log_source
+
+Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "ServerSync starting. Tag='$Tag'"
+
+$selectedPairs = Select-ServerSyncPairs -Pairs $config.folder_pairs -Tag $Tag
+Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Matched $($selectedPairs.Count) pair(s)"
+
+if ($selectedPairs.Count -eq 0) {
+    Write-ServerSyncLog -Logger $logger -Level 'WARN' -Message 'No pairs matched, exiting'
+    exit 0
+}
+
+$hasFailures = $false
+$nicsEnabled = $false
+
+try {
+    if ($PSCmdlet.ShouldProcess('NICs', "Enable $($config.network.nics -join ', ')")) {
+        Enable-ServerSyncNics -Names $config.network.nics
+        $nicsEnabled = $true
+        Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "NICs enabled"
+
+        if (-not (Wait-NetworkReady -TargetHost $config.network.ready_check_host -TimeoutSeconds $config.network.ready_timeout_seconds)) {
+            throw "Network not ready after $($config.network.ready_timeout_seconds)s (host: $($config.network.ready_check_host))"
+        }
+        Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Network ready"
+    }
+
+    foreach ($pair in $selectedPairs) {
+        Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "=== Pair: $($pair.name) ==="
+        try {
+            $cred = Get-ServerSyncCredential -TargetName $pair.credential_target
+
+            # Map SMB drive temporarily for this pair
+            $useDrive = $false
+            try {
+                if ($PSCmdlet.ShouldProcess($pair.source, 'New-SmbMapping')) {
+                    New-SmbMapping -RemotePath $pair.source `
+                        -UserName $cred.UserName `
+                        -Password $cred.GetNetworkCredential().Password `
+                        -Persistent $false -ErrorAction Stop | Out-Null
+                    $useDrive = $true
+                }
+
+                $result = Invoke-RobocopySync -Source $pair.source `
+                    -Destination $pair.destination `
+                    -Threads $config.robocopy.threads `
+                    -Retries $config.robocopy.retries `
+                    -RetryWaitSeconds $config.robocopy.retry_wait_seconds `
+                    -LogFile $logger.LogPath `
+                    -ExtraFlags $config.robocopy.extra_flags `
+                    -WhatIf:$WhatIfPreference
+
+                Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  robocopy exit $($result.ExitCode): $($result.Description)"
+
+                if (-not $result.Success) {
+                    $hasFailures = $true
+                    Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "  SYNC FAILED for '$($pair.name)'" -AlsoEventLog
+                    continue
+                }
+
+                # Retention
+                $policy = Resolve-RetentionPolicy -Pair $pair -Defaults $config.retention
+                Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  retention: mode=$($policy.Mode) count=$($policy.Count)"
+                $cb = { param($msg) Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  $msg" }
+                Invoke-Retention -DestinationRoot $pair.destination -Policy $policy `
+                    -LogCallback $cb -WhatIf:$WhatIfPreference
+            }
+            finally {
+                if ($useDrive -and (Get-SmbMapping -RemotePath $pair.source -ErrorAction SilentlyContinue)) {
+                    Remove-SmbMapping -RemotePath $pair.source -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        catch {
+            $hasFailures = $true
+            Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "  PAIR ERROR '$($pair.name)': $($_.Exception.Message)" -AlsoEventLog
+            # continue to next pair
+        }
+    }
+}
+catch {
+    Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "FATAL: $($_.Exception.Message)" -AlsoEventLog
+    $hasFailures = $true
+}
+finally {
+    if ($nicsEnabled) {
+        try {
+            if ($PSCmdlet.ShouldProcess('NICs', "Disable $($config.network.nics -join ', ')")) {
+                Disable-ServerSyncNics -Names $config.network.nics
+            }
+        }
+        catch {
+            Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Failed to disable NICs: $($_.Exception.Message)" -AlsoEventLog
+        }
+
+        # Verify
+        $allDown = $true
+        if (-not $WhatIfPreference) {
+            $allDown = Test-AllNicsDisabled -Names $config.network.nics
+        }
+        if (-not $allDown) {
+            Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message 'CRITICAL: NIC disable could not be verified' -AlsoEventLog
+            # Urgent email
+            try {
+                $smtpCred = $null
+                if ($config.email.enabled -and $config.email.credential_target) {
+                    $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
+                }
+                Send-ServerSyncEmail -Config $config.email `
+                    -Subject '[URGENT] ServerSync: NIC DISABLE VERIFICATION FAILED' `
+                    -Body "Host: $env:COMPUTERNAME`nNICs may still be active. Investigate immediately." `
+                    -Credential $smtpCred -HasFailures $true
+            } catch {}
+            exit 3
+        }
+        Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message 'NICs verified disabled'
+    }
+
+    Remove-OldLogFiles -LogDirectory $config.logging.log_directory -RetentionDays $config.logging.log_retention_days
+}
+
+# Summary email
+try {
+    if ($config.email.enabled) {
+        $smtpCred = $null
+        if ($config.email.credential_target) {
+            $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
+        }
+        $status = if ($hasFailures) { 'FAILURES' } else { 'OK' }
+        Send-ServerSyncEmail -Config $config.email `
+            -Subject "[ServerSync] $status on $env:COMPUTERNAME" `
+            -Body (Get-Content -Raw $logger.LogPath) `
+            -Credential $smtpCred -HasFailures $hasFailures
+    }
+} catch {
+    Write-ServerSyncLog -Logger $logger -Level 'WARN' -Message "Email send failed: $($_.Exception.Message)"
+}
+
+if ($hasFailures) { exit 1 } else { exit 0 }
