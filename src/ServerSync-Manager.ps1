@@ -53,7 +53,7 @@ $tabs.TabPages.AddRange(@($tabConfig, $tabLogs, $tabCreds, $tabSched))
 $form.Controls.Add($tabs)
 
 # Placeholder labels per tab — filled by subsequent tasks
-foreach ($tab in @($tabCreds,$tabSched)) {
+foreach ($tab in @($tabSched)) {
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Text = "$($tab.Text) tab (not yet implemented)"
     $lbl.Dock = 'Fill'
@@ -322,5 +322,109 @@ $chkFailOnly.Add_CheckedChanged({ Show-SelectedLog })
 $btnRefreshLog.Add_Click({ Refresh-LogList; Show-SelectedLog })
 
 Refresh-LogList
+
+# ==================== Credentials tab ====================
+$credsPanel = New-Object System.Windows.Forms.TableLayoutPanel
+$credsPanel.Dock = 'Fill'
+$credsPanel.RowCount = 2
+$credsPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent',100))) | Out-Null
+$credsPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',40))) | Out-Null
+
+$credGrid = New-Object System.Windows.Forms.DataGridView
+$credGrid.Dock = 'Fill'
+$credGrid.AutoGenerateColumns = $false
+$credGrid.ReadOnly = $true
+$credGrid.SelectionMode = 'FullRowSelect'
+$credGrid.AllowUserToAddRows = $false
+
+foreach ($colDef in @(
+    @{ Name='target'; Header='Target'; Width=200 },
+    @{ Name='status'; Header='Status'; Width=100 },
+    @{ Name='username'; Header='UserName'; Width=200 }
+)) {
+    $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col.Name = $colDef.Name; $col.HeaderText = $colDef.Header; $col.Width = $colDef.Width
+    $credGrid.Columns.Add($col) | Out-Null
+}
+$credsPanel.Controls.Add($credGrid, 0, 0)
+
+$credButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+$credButtons.Dock = 'Fill'
+$btnAddCred = New-Object System.Windows.Forms.Button -Property @{ Text='Add/Update'; Width=120 }
+$btnDelCred = New-Object System.Windows.Forms.Button -Property @{ Text='Delete'; Width=100 }
+$btnRefCred = New-Object System.Windows.Forms.Button -Property @{ Text='Refresh'; Width=80 }
+$credButtons.Controls.AddRange(@($btnAddCred,$btnDelCred,$btnRefCred))
+$credsPanel.Controls.Add($credButtons, 0, 1)
+
+$tabCreds.Controls.Add($credsPanel)
+
+function Refresh-Credentials {
+    $credGrid.Rows.Clear()
+    if (-not $script:WorkingConfig) { return }
+    $targets = @()
+    foreach ($pair in $script:WorkingConfig.folder_pairs) {
+        if ($pair.credential_target) { $targets += $pair.credential_target }
+    }
+    if ($script:WorkingConfig.email -and $script:WorkingConfig.email.credential_target) {
+        $targets += $script:WorkingConfig.email.credential_target
+    }
+    $targets = $targets | Select-Object -Unique
+    foreach ($t in $targets) {
+        $status = 'MISSING'; $user = ''
+        try {
+            $c = Get-StoredCredential -Target $t -ErrorAction SilentlyContinue
+            if ($c) { $status = 'OK'; $user = $c.UserName }
+        } catch {}
+        [void]$credGrid.Rows.Add($t,$status,$user)
+    }
+}
+
+function Prompt-AddCredential {
+    param($Target)
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Set credential: $Target"
+    $dlg.Size = New-Object System.Drawing.Size(400, 180)
+    $dlg.StartPosition = 'CenterParent'
+
+    $lblU = New-Object System.Windows.Forms.Label -Property @{ Text='UserName:'; Location='10,20'; Size='80,20' }
+    $tbU = New-Object System.Windows.Forms.TextBox -Property @{ Location='100,20'; Size='270,20' }
+    $lblP = New-Object System.Windows.Forms.Label -Property @{ Text='Password:'; Location='10,50'; Size='80,20' }
+    $tbP = New-Object System.Windows.Forms.TextBox -Property @{ Location='100,50'; Size='270,20'; UseSystemPasswordChar=$true }
+    $ok = New-Object System.Windows.Forms.Button -Property @{ Text='OK'; DialogResult='OK'; Location='200,90' }
+    $cancel = New-Object System.Windows.Forms.Button -Property @{ Text='Cancel'; DialogResult='Cancel'; Location='290,90' }
+    $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
+    $dlg.Controls.AddRange(@($lblU,$tbU,$lblP,$tbP,$ok,$cancel))
+    if ($dlg.ShowDialog() -ne 'OK') { return }
+
+    $secure = ConvertTo-SecureString -String $tbP.Text -AsPlainText -Force
+    try {
+        if (Get-StoredCredential -Target $Target -ErrorAction SilentlyContinue) {
+            Remove-StoredCredential -Target $Target
+        }
+        New-StoredCredential -Target $Target -UserName $tbU.Text -SecurePassword $secure `
+            -Persist LocalMachine -Type Generic | Out-Null
+        Refresh-Credentials
+    }
+    catch {
+        [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Error',0,16)
+    }
+}
+
+$btnRefCred.Add_Click({ Refresh-Credentials })
+$btnAddCred.Add_Click({
+    if ($credGrid.SelectedRows.Count -eq 0) { return }
+    $target = $credGrid.SelectedRows[0].Cells['target'].Value
+    Prompt-AddCredential -Target $target
+})
+$btnDelCred.Add_Click({
+    if ($credGrid.SelectedRows.Count -eq 0) { return }
+    $target = $credGrid.SelectedRows[0].Cells['target'].Value
+    if ([System.Windows.Forms.MessageBox]::Show("Delete credential '$target'?",'Confirm',4,32) -eq 'Yes') {
+        try { Remove-StoredCredential -Target $target } catch {}
+        Refresh-Credentials
+    }
+})
+
+Refresh-Credentials
 
 [void]$form.ShowDialog()
