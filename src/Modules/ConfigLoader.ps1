@@ -160,3 +160,22 @@ function Resolve-RetentionPolicy {
         Extensions = $extensions
     }
 }
+
+function Get-ServerSyncCredential {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TargetName
+    )
+
+    # On Windows, use the CredentialManager module (install: Install-Module CredentialManager -Scope AllUsers)
+    # Offline install: extract the module to $env:PSModulePath on the air-gapped server.
+    if (-not (Get-Command Get-StoredCredential -ErrorAction SilentlyContinue)) {
+        throw "CredentialManager module not available. Install it (Install-Module CredentialManager) or copy it to PSModulePath."
+    }
+
+    $cred = Get-StoredCredential -Target $TargetName
+    if (-not $cred) {
+        throw "Credential not found in Credential Manager: $TargetName"
+    }
+    return $cred
+}
