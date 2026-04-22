@@ -53,7 +53,7 @@ $tabs.TabPages.AddRange(@($tabConfig, $tabLogs, $tabCreds, $tabSched))
 $form.Controls.Add($tabs)
 
 # Placeholder labels per tab — filled by subsequent tasks
-foreach ($tab in @($tabLogs,$tabCreds,$tabSched)) {
+foreach ($tab in @($tabCreds,$tabSched)) {
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Text = "$($tab.Text) tab (not yet implemented)"
     $lbl.Dock = 'Fill'
@@ -249,5 +249,78 @@ $btnDelete.Add_Click({
 
 # Initial load
 Load-Config
+
+# ==================== Logs tab ====================
+$logsPanel = New-Object System.Windows.Forms.SplitContainer
+$logsPanel.Dock = 'Fill'
+$logsPanel.SplitterDistance = 200
+
+$logList = New-Object System.Windows.Forms.ListBox
+$logList.Dock = 'Fill'
+
+$logContentPanel = New-Object System.Windows.Forms.TableLayoutPanel
+$logContentPanel.Dock = 'Fill'
+$logContentPanel.RowCount = 2
+$logContentPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',30))) | Out-Null
+$logContentPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent',100))) | Out-Null
+
+$logTopPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$logTopPanel.Dock = 'Fill'
+$lblFilter = New-Object System.Windows.Forms.Label -Property @{ Text='Filter:'; Width=50 }
+$txtFilter = New-Object System.Windows.Forms.TextBox -Property @{ Width=200 }
+$chkFailOnly = New-Object System.Windows.Forms.CheckBox -Property @{ Text='Failures only'; Width=120 }
+$btnRefreshLog = New-Object System.Windows.Forms.Button -Property @{ Text='Refresh'; Width=80 }
+$logTopPanel.Controls.AddRange(@($lblFilter,$txtFilter,$chkFailOnly,$btnRefreshLog))
+$logContentPanel.Controls.Add($logTopPanel, 0, 0)
+
+$logText = New-Object System.Windows.Forms.TextBox
+$logText.Multiline = $true
+$logText.ScrollBars = 'Vertical'
+$logText.ReadOnly = $true
+$logText.Dock = 'Fill'
+$logText.Font = New-Object System.Drawing.Font('Consolas', 9)
+$logContentPanel.Controls.Add($logText, 0, 1)
+
+$logsPanel.Panel1.Controls.Add($logList)
+$logsPanel.Panel2.Controls.Add($logContentPanel)
+$tabLogs.Controls.Add($logsPanel)
+
+function Get-LogDir {
+    if ($script:WorkingConfig -and $script:WorkingConfig.logging.log_directory) {
+        return $script:WorkingConfig.logging.log_directory
+    }
+    return 'C:\ProgramData\ServerSync\logs'
+}
+
+function Refresh-LogList {
+    $logList.Items.Clear()
+    $dir = Get-LogDir
+    if (-not (Test-Path $dir)) { return }
+    Get-ChildItem -Path $dir -File -Filter '*.log' |
+        Sort-Object LastWriteTime -Descending |
+        ForEach-Object { [void]$logList.Items.Add($_.Name) }
+}
+
+function Show-SelectedLog {
+    if ($logList.SelectedItem -eq $null) { return }
+    $dir = Get-LogDir
+    $path = Join-Path $dir $logList.SelectedItem
+    if (-not (Test-Path $path)) { return }
+    $lines = Get-Content -Path $path
+    if ($chkFailOnly.Checked) {
+        $lines = $lines | Where-Object { $_ -match 'ERROR|FAIL' }
+    }
+    if ($txtFilter.Text) {
+        $lines = $lines | Where-Object { $_ -like "*$($txtFilter.Text)*" }
+    }
+    $logText.Text = ($lines -join [Environment]::NewLine)
+}
+
+$logList.Add_SelectedIndexChanged({ Show-SelectedLog })
+$txtFilter.Add_TextChanged({ Show-SelectedLog })
+$chkFailOnly.Add_CheckedChanged({ Show-SelectedLog })
+$btnRefreshLog.Add_Click({ Refresh-LogList; Show-SelectedLog })
+
+Refresh-LogList
 
 [void]$form.ShowDialog()
