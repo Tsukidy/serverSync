@@ -1,0 +1,43 @@
+{
+  "network": {
+    "nics": ["Ethernet"],
+    "ready_timeout_seconds": 30,
+    "ready_check_host": "192.168.10.1"
+  },
+  "robocopy": {
+    "threads": 6,
+    "retries": 3,
+    "retry_wait_seconds": 10,
+    "extra_flags": []
+  },
+  "retention": {
+    "default_mode": "files",
+    "default_extensions": [".TIB"],
+    "default_count": 3
+  },
+  "logging": {
+    "log_directory": "C:\\ProgramData\\ServerSync\\logs",
+    "log_retention_days": 90,
+    "event_log_source": "ServerSync"
+  },
+  "email": {
+    "enabled": false,
+    "smtp_server": "mail.internal.lan",
+    "smtp_port": 25,
+    "use_ssl": false,
+    "credential_target": "ServerSync-SMTP",
+    "from": "serversync@company.local",
+    "to": ["sysadmin@company.local"],
+    "send_on": "failure"
+  },
+  "folder_pairs": [
+    {
+      "name": "ExampleServerA",
+      "source": "\\\\backup01.internal.lan\\Backups\\ServerA",
+      "destination": "D:\\AirgappedBackups\\ServerA",
+      "credential_target": "ServerSync-Backup01",
+      "retention": { "mode": "files", "extensions": [".TIB"], "count": 5 },
+      "tags": ["default", "daily"]
+    }
+  ]
+}
