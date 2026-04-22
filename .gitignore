@@ -1,0 +1,20 @@
+# Runtime artifacts
+logs/
+*.log
+*.tmp
+*.bak
+
+# Local config with credentials references
+config/config.local.json
+
+# Pester results
+TestResults.xml
+coverage.xml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/settings.json
+.idea/
