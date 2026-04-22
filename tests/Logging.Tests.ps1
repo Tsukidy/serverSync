@@ -45,3 +45,26 @@ Describe 'Logging - file logger' -Tag 'Unit' {
         Test-Path $new.FullName | Should -Be $true
     }
 }
+
+Describe 'Logging - email' -Tag 'Unit' {
+    It 'Send-ServerSyncEmail returns early when email.enabled is false' {
+        $emailConfig = [PSCustomObject]@{ enabled=$false }
+        # Should not throw and should not call Send-MailMessage
+        { Send-ServerSyncEmail -Config $emailConfig -Subject 'x' -Body 'y' -Credential $null } |
+            Should -Not -Throw
+    }
+
+    It 'Send-ServerSyncEmail returns early when send_on is "failure" and no failures' {
+        $emailConfig = [PSCustomObject]@{ enabled=$true; send_on='failure' }
+        { Send-ServerSyncEmail -Config $emailConfig -Subject 'x' -Body 'y' -Credential $null -HasFailures $false } |
+            Should -Not -Throw
+    }
+
+    It 'Test-ShouldSendEmail matches send_on logic' {
+        (Test-ShouldSendEmail -SendOn 'always'  -HasFailures $true)  | Should -Be $true
+        (Test-ShouldSendEmail -SendOn 'always'  -HasFailures $false) | Should -Be $true
+        (Test-ShouldSendEmail -SendOn 'failure' -HasFailures $true)  | Should -Be $true
+        (Test-ShouldSendEmail -SendOn 'failure' -HasFailures $false) | Should -Be $false
+        (Test-ShouldSendEmail -SendOn 'never'   -HasFailures $true)  | Should -Be $false
+    }
+}
