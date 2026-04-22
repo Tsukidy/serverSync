@@ -52,14 +52,6 @@ $tabSched   = New-Object System.Windows.Forms.TabPage -Property @{ Text = 'Sched
 $tabs.TabPages.AddRange(@($tabConfig, $tabLogs, $tabCreds, $tabSched))
 $form.Controls.Add($tabs)
 
-# Placeholder labels per tab — filled by subsequent tasks
-foreach ($tab in @($tabSched)) {
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = "$($tab.Text) tab (not yet implemented)"
-    $lbl.Dock = 'Fill'
-    $lbl.TextAlign = 'MiddleCenter'
-    $tab.Controls.Add($lbl)
-}
 
 # ==================== Config tab ====================
 $cfgPanel = New-Object System.Windows.Forms.TableLayoutPanel
@@ -426,5 +418,165 @@ $btnDelCred.Add_Click({
 })
 
 Refresh-Credentials
+
+# ==================== Schedule tab ====================
+$schedPanel = New-Object System.Windows.Forms.TableLayoutPanel
+$schedPanel.Dock = 'Fill'
+$schedPanel.RowCount = 2
+$schedPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent',100))) | Out-Null
+$schedPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',40))) | Out-Null
+
+$schedGrid = New-Object System.Windows.Forms.DataGridView
+$schedGrid.Dock = 'Fill'
+$schedGrid.AutoGenerateColumns = $false
+$schedGrid.ReadOnly = $true
+$schedGrid.SelectionMode = 'FullRowSelect'
+$schedGrid.AllowUserToAddRows = $false
+
+foreach ($colDef in @(
+    @{ Name='name'; Header='Task'; Width=160 },
+    @{ Name='tag'; Header='Tag'; Width=80 },
+    @{ Name='trigger'; Header='Trigger'; Width=200 },
+    @{ Name='state'; Header='State'; Width=90 },
+    @{ Name='lastRun'; Header='Last run'; Width=140 },
+    @{ Name='lastResult'; Header='Last result'; Width=90 }
+)) {
+    $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col.Name = $colDef.Name; $col.HeaderText = $colDef.Header; $col.Width = $colDef.Width
+    $schedGrid.Columns.Add($col) | Out-Null
+}
+$schedPanel.Controls.Add($schedGrid, 0, 0)
+
+$schedButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+$schedButtons.Dock = 'Fill'
+$btnAddSched = New-Object System.Windows.Forms.Button -Property @{ Text='Add task'; Width=100 }
+$btnDelSched = New-Object System.Windows.Forms.Button -Property @{ Text='Delete'; Width=80 }
+$btnRunSched = New-Object System.Windows.Forms.Button -Property @{ Text='Run now'; Width=80 }
+$btnRefSched = New-Object System.Windows.Forms.Button -Property @{ Text='Refresh'; Width=80 }
+$schedButtons.Controls.AddRange(@($btnAddSched,$btnDelSched,$btnRunSched,$btnRefSched))
+$schedPanel.Controls.Add($schedButtons, 0, 1)
+
+$tabSched.Controls.Add($schedPanel)
+
+$script:TaskFolder = '\ServerSync\'
+
+function Refresh-ScheduledTasks {
+    $schedGrid.Rows.Clear()
+    try {
+        $tasks = Get-ScheduledTask -TaskPath $script:TaskFolder -ErrorAction Stop
+    } catch { return }
+    foreach ($t in $tasks) {
+        $info = $t | Get-ScheduledTaskInfo
+        $tag = ''
+        if ($t.Actions.Count -gt 0 -and $t.Actions[0].Arguments -match '-Tag\s+(\S+)') {
+            $tag = $matches[1]
+        }
+        $trig = if ($t.Triggers.Count -gt 0) { $t.Triggers[0].StartBoundary } else { '' }
+        [void]$schedGrid.Rows.Add($t.TaskName,$tag,$trig,$t.State,$info.LastRunTime,$info.LastTaskResult)
+    }
+}
+
+function Get-AvailableTags {
+    $tags = @()
+    if ($script:WorkingConfig) {
+        foreach ($p in $script:WorkingConfig.folder_pairs) {
+            if ($p.tags) { $tags += $p.tags }
+        }
+    }
+    return (,'(no filter — default run)') + ($tags | Select-Object -Unique | Sort-Object)
+}
+
+function Prompt-AddSchedule {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Add scheduled task'
+    $dlg.Size = New-Object System.Drawing.Size(450, 330)
+    $dlg.StartPosition = 'CenterParent'
+
+    $y = 10
+    function Add-Row([string]$label, [System.Windows.Forms.Control]$ctl) {
+        $lbl = New-Object System.Windows.Forms.Label -Property @{ Text=$label; Location="10,$y"; Size='150,20' }
+        $ctl.Location = New-Object System.Drawing.Point(170, $y)
+        $ctl.Size = New-Object System.Drawing.Size(250, 20)
+        $dlg.Controls.Add($lbl); $dlg.Controls.Add($ctl)
+        $script:y = $y + 30
+    }
+
+    $tbName = New-Object System.Windows.Forms.TextBox
+    Add-Row 'Task name:' $tbName; $y = $script:y
+
+    $cbType = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle='DropDownList' }
+    $cbType.Items.AddRange(@('Daily','Weekly','Once'))
+    Add-Row 'Schedule:' $cbType; $y = $script:y
+
+    $tbTime = New-Object System.Windows.Forms.TextBox -Property @{ Text = '02:00' }
+    Add-Row 'Time (HH:mm):' $tbTime; $y = $script:y
+
+    $cbDow = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle='DropDownList' }
+    $cbDow.Items.AddRange(@('Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'))
+    Add-Row 'Day (weekly):' $cbDow; $y = $script:y
+
+    $cbTag = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle='DropDownList' }
+    Get-AvailableTags | ForEach-Object { [void]$cbTag.Items.Add($_) }
+    if ($cbTag.Items.Count -gt 0) { $cbTag.SelectedIndex = 0 }
+    Add-Row 'Tag filter:' $cbTag; $y = $script:y
+
+    $tbUser = New-Object System.Windows.Forms.TextBox
+    Add-Row 'Run as (user):' $tbUser; $y = $script:y
+
+    $ok = New-Object System.Windows.Forms.Button -Property @{ Text='OK'; DialogResult='OK'; Location="240,$y" }
+    $cancel = New-Object System.Windows.Forms.Button -Property @{ Text='Cancel'; DialogResult='Cancel'; Location="330,$y" }
+    $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
+    $dlg.Controls.AddRange(@($ok,$cancel))
+
+    if ($dlg.ShowDialog() -ne 'OK') { return }
+
+    if (-not $tbName.Text) { return }
+
+    $hh,$mm = $tbTime.Text -split ':'
+    $at = (Get-Date).Date.AddHours([int]$hh).AddMinutes([int]$mm)
+
+    $trigger = switch ($cbType.SelectedItem) {
+        'Daily'  { New-ScheduledTaskTrigger -Daily -At $at }
+        'Weekly' { New-ScheduledTaskTrigger -Weekly -DaysOfWeek $cbDow.SelectedItem -At $at }
+        'Once'   { New-ScheduledTaskTrigger -Once -At $at }
+    }
+
+    $scriptPath = Join-Path $PSScriptRoot 'Start-ServerSync.ps1'
+    $taskArgs = "-NoProfile -File `"$scriptPath`""
+    if ($cbTag.SelectedItem -and $cbTag.SelectedItem -ne '(no filter — default run)') {
+        $taskArgs += " -Tag $($cbTag.SelectedItem)"
+    }
+
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
+    try {
+        Register-ScheduledTask -TaskName $tbName.Text -TaskPath $script:TaskFolder `
+            -Action $action -Trigger $trigger -Settings $settings `
+            -User $tbUser.Text -RunLevel Highest -Force | Out-Null
+        Refresh-ScheduledTasks
+    }
+    catch {
+        [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Error',0,16)
+    }
+}
+
+$btnRefSched.Add_Click({ Refresh-ScheduledTasks })
+$btnAddSched.Add_Click({ Prompt-AddSchedule })
+$btnDelSched.Add_Click({
+    if ($schedGrid.SelectedRows.Count -eq 0) { return }
+    $name = $schedGrid.SelectedRows[0].Cells['name'].Value
+    if ([System.Windows.Forms.MessageBox]::Show("Delete task '$name'?",'Confirm',4,32) -eq 'Yes') {
+        Unregister-ScheduledTask -TaskName $name -TaskPath $script:TaskFolder -Confirm:$false
+        Refresh-ScheduledTasks
+    }
+})
+$btnRunSched.Add_Click({
+    if ($schedGrid.SelectedRows.Count -eq 0) { return }
+    $name = $schedGrid.SelectedRows[0].Cells['name'].Value
+    Start-ScheduledTask -TaskName $name -TaskPath $script:TaskFolder
+})
+
+Refresh-ScheduledTasks
 
 [void]$form.ShowDialog()
