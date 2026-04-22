@@ -5,12 +5,12 @@
 
 ## Purpose
 
-Automate secure, one-way pulls of Acronis `.TIB` backup files from multiple Windows Server backup sources onto an air-gapped Windows Server. The script must:
+Automate secure, one-way pulls of backup data (initially Acronis `.TIB` files, extensible to other extensions or folder-based backups) from multiple Windows Server backup sources onto an air-gapped Windows Server. The script must:
 
 1. Enable networking on the air-gapped server
 2. Pull files from each configured folder pair (source → destination)
 3. Always disable networking when finished, even on failure
-4. Apply per-folder-pair retention (keep N newest `.TIB` files per subdirectory)
+4. Apply per-folder-pair retention in either file-extension mode or folder mode
 5. Provide a GUI for configuration, log viewing, credential management, and scheduling
 
 The air-gapped server pulls only — nothing is pushed back.
@@ -33,7 +33,7 @@ The air-gapped server pulls only — nothing is pushed back.
 | `Setup-Credentials.ps1` | CLI credential setup (alternative to GUI tab) |
 | `Modules\NetworkControl.ps1` | Enable/disable NICs, verify network readiness |
 | `Modules\SyncOperations.ps1` | Invoke robocopy, parse exit codes |
-| `Modules\Retention.ps1` | Per-subdirectory `.TIB` retention cleanup |
+| `Modules\Retention.ps1` | Per-subdirectory retention cleanup (files mode or folders mode) |
 | `Modules\Logging.ps1` | File log + Windows Event Log + SMTP email |
 | `Modules\ConfigLoader.ps1` | Load and validate `config.json` |
 
@@ -68,7 +68,7 @@ The air-gapped server pulls only — nothing is pushed back.
     │   │   │   ├─ Parse robocopy exit code
     │   │   │   ├─ Remove-SmbMapping
     │   │   │   └─ If success: retention cleanup on destination
-    │   │   │       └─ For each subdirectory: keep N newest .TIB files, delete rest
+    │   │   │       └─ For each subdirectory: apply per-pair retention (files or folders mode)
     │   │   └─ CATCH
     │   │       └─ Log failure, mark pair failed, continue to next
     │   │
@@ -102,7 +102,8 @@ The air-gapped server pulls only — nothing is pushed back.
     "extra_flags": []
   },
   "retention": {
-    "file_extension": ".TIB",
+    "default_mode": "files",
+    "default_extensions": [".TIB"],
     "default_count": 3
   },
   "logging": {
@@ -122,20 +123,33 @@ The air-gapped server pulls only — nothing is pushed back.
   },
   "folder_pairs": [
     {
-      "name": "FileServer01",
+      "name": "FileServer01 TIB Backups",
       "source": "\\\\backup01.internal.lan\\Backups\\FileServer01",
       "destination": "D:\\AirgappedBackups\\FileServer01",
       "credential_target": "ServerSync-Backup01",
-      "retention_count": 5,
+      "retention": {
+        "mode": "files",
+        "extensions": [".TIB"],
+        "count": 5
+      },
       "tags": ["default", "daily", "critical"]
     },
     {
-      "name": "VM Backups",
+      "name": "Veeam Folder-Based VM Backups",
       "source": "\\\\backup02.internal.lan\\VMBackups",
       "destination": "D:\\AirgappedBackups\\VMs",
       "credential_target": "ServerSync-Backup02",
-      "retention_count": 7,
+      "retention": {
+        "mode": "folders",
+        "count": 7
+      },
       "tags": ["weekly"]
+    },
+    {
+      "name": "Minimal (inherits all defaults)",
+      "source": "\\\\backup01.internal.lan\\Backups\\MailServer",
+      "destination": "D:\\AirgappedBackups\\MailServer",
+      "credential_target": "ServerSync-Backup01"
     }
   ]
 }
@@ -145,13 +159,21 @@ The air-gapped server pulls only — nothing is pushed back.
 
 - `network.ready_check_host` — host pinged after NIC enable to confirm network is usable before syncs start.
 - `robocopy.extra_flags` — escape hatch for adding flags without editing code (e.g. `/COMPRESS`).
-- `retention.default_count` — applies when a pair omits `retention_count`. Default: 3.
-- `retention.file_extension` — extension matched during cleanup (case-insensitive). Default: `.TIB`.
+- `retention.default_mode` — `"files"` or `"folders"`. Applies when a pair omits `retention.mode`. Default: `"files"`.
+- `retention.default_extensions` — array of extensions (case-insensitive) used in files mode when a pair omits `retention.extensions`. Default: `[".TIB"]`.
+- `retention.default_count` — applies when a pair omits `retention.count`. Default: 3.
 - `email.send_on` — `"failure"` (recommended), `"always"`, or `"never"`.
 - `email.credential_target` — SMTP auth credentials from Credential Manager; never in config.
 - `folder_pairs[].credential_target` — per-pair, so different source servers can use different credentials.
-- `folder_pairs[].retention_count` — optional, falls back to `retention.default_count`.
+- `folder_pairs[].retention` — optional object; any missing fields fall back to global defaults. Omit entirely to inherit all defaults.
 - `folder_pairs[].tags` — see tag semantics below.
+
+### Retention modes
+
+- **`files`** — In each immediate subfolder of the destination, keep the N newest files whose extension matches any entry in `extensions` (case-insensitive). Delete older matches. Multiple extensions are tracked independently — "keep 5 newest `.TIB` AND keep 5 newest `.vbm`." Files whose extension is not in the list are never touched.
+- **`folders`** — In each immediate subfolder of the destination, keep the N newest sub-subfolders (by last-modified time). Delete older ones recursively. Files at the level being evaluated are not touched, only subfolders.
+
+Both modes operate at "one level deep = one machine/VM" per the established hierarchy. The sync phase always copies the full tree; extension/folder filtering only happens at the retention step.
 
 ### Tag semantics
 
@@ -264,8 +286,8 @@ Built with Windows Forms (`System.Windows.Forms`). Built into .NET Framework; no
 - **Dry-run mode** (`-WhatIf`): resolves config, tags, lists what would sync and what would be deleted, without touching NICs, files, or SMB.
 - **Config validation** (`-ValidateConfig`): parses and reports schema errors without running.
 - **Pester unit tests** for:
-  - Retention logic (the only destructive piece) — thorough coverage
-  - Config parsing and validation
+  - Retention logic — files mode and folders mode (the only destructive piece) — thorough coverage
+  - Config parsing and validation (including retention-defaults inheritance)
   - Tag filtering
   - Robocopy exit-code interpretation
 - **Integration test fixture**: local-only test config using temp folders (no real NICs, no real SMB) for smoke-testing changes.
