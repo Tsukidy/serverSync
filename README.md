@@ -39,3 +39,16 @@ powershell -File src\Start-ServerSync.ps1 -WhatIf
 
 Full design: `docs/superpowers/specs/2026-04-22-serversync-design.md`
 Implementation plan: `docs/superpowers/plans/2026-04-22-serversync-implementation.md`
+
+## Development
+
+Unit tests run anywhere PowerShell + Pester are available:
+
+    pwsh -Command "Invoke-Pester -Path tests -Output Detailed"
+
+Tests tagged `Windows` require a Windows host:
+
+    pwsh -Command "Invoke-Pester -Path tests -Tag Windows -Output Detailed"
+
+End-to-end validation (NICs, SMB, Credential Manager, robocopy) must be done on
+a Windows Server test VM that mirrors production.
