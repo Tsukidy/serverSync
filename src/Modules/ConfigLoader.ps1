@@ -95,3 +95,68 @@ function Test-ServerSyncConfig {
         Errors = $errors.ToArray()
     }
 }
+
+function Select-ServerSyncPairs {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [Object[]]$Pairs,
+
+        [string]$Tag
+    )
+
+    $results = foreach ($pair in $Pairs) {
+        $tags = @()
+        if ($pair.PSObject.Properties.Name -contains 'tags' -and $null -ne $pair.tags) {
+            $tags = @($pair.tags)
+        }
+        if ($tags.Count -eq 0) { continue }  # no tags means disabled
+
+        if ($Tag) {
+            if ($tags -contains $Tag) { $pair }
+        }
+        else {
+            if ($tags -contains 'default') { $pair }
+        }
+    }
+    # Ensure we always return an array, even for 0 or 1 matches
+    return ,@($results)
+}
+
+function Resolve-RetentionPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [Object]$Pair,
+
+        [Parameter(Mandatory)]
+        [Object]$Defaults
+    )
+
+    $pairRetention = $null
+    if ($Pair.PSObject.Properties.Name -contains 'retention' -and $null -ne $Pair.retention) {
+        $pairRetention = $Pair.retention
+    }
+
+    $mode = if ($pairRetention -and $pairRetention.mode) { $pairRetention.mode }
+            else { $Defaults.default_mode }
+
+    $count = if ($pairRetention -and $pairRetention.count) { $pairRetention.count }
+             else { $Defaults.default_count }
+
+    $extensions = @()
+    if ($mode -eq 'files') {
+        if ($pairRetention -and $pairRetention.extensions) {
+            $extensions = @($pairRetention.extensions)
+        }
+        else {
+            $extensions = @($Defaults.default_extensions)
+        }
+    }
+
+    return [PSCustomObject]@{
+        Mode       = $mode
+        Count      = $count
+        Extensions = $extensions
+    }
+}
