@@ -38,7 +38,8 @@ $modulesDir = Join-Path $PSScriptRoot 'Modules'
 $config = Read-ServerSyncConfig -Path $ConfigPath
 $validation = Test-ServerSyncConfig -Config $config
 if (-not $validation.Valid) {
-    Write-Error "Config invalid:`n$($validation.Errors -join "`n")"
+    [Console]::Error.WriteLine("Config invalid:")
+    foreach ($e in $validation.Errors) { [Console]::Error.WriteLine("  $e") }
     exit 2
 }
 
