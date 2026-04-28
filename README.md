@@ -42,13 +42,22 @@ Implementation plan: `docs/superpowers/plans/2026-04-22-serversync-implementatio
 
 ## Development
 
-Unit tests run anywhere PowerShell + Pester are available:
+Unit tests run anywhere PowerShell + Pester 5 are available, including
+Windows PowerShell 5.1 on Windows Server / Windows 11:
 
-    pwsh -Command "Invoke-Pester -Path tests -Output Detailed"
-
-Tests tagged `Windows` require a Windows host:
-
-    pwsh -Command "Invoke-Pester -Path tests -Tag Windows -Output Detailed"
+    Invoke-Pester -Path tests -Output Detailed
 
 End-to-end validation (NICs, SMB, Credential Manager, robocopy) must be done on
 a Windows Server test VM that mirrors production.
+
+### Setting up credentials
+
+**Always run `Setup-Credentials.ps1` from an interactive console session** —
+the physical console, an RDP session, or a local PowerShell window. Do not run
+it through SSH.
+
+When credentials are stored in Credential Manager via an SSH session, Windows
+binds them to the SSH (Network) logon token. Sub-processes spawned later
+(child PowerShell, scheduled tasks) get their own logon token and cannot read
+those credentials, failing with error 1312 ("logon session does not exist").
+Storing the credentials from an interactive logon avoids this entirely.
