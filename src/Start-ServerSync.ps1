@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 
 # Resolve default config path
 if (-not $ConfigPath) {
-    $ConfigPath = Join-Path $PSScriptRoot '..' 'config' 'config.json'
+    $ConfigPath = [IO.Path]::Combine($PSScriptRoot, '..', 'config', 'config.json')
 }
 
 # Load modules (dot-source)

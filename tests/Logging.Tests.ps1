@@ -1,5 +1,5 @@
 BeforeAll {
-    $script:ModulePath = Join-Path $PSScriptRoot '..' 'src' 'Modules' 'Logging.ps1'
+    $script:ModulePath = [IO.Path]::Combine($PSScriptRoot, '..', 'src', 'Modules', 'Logging.ps1')
     . $script:ModulePath
 }
 

@@ -1,5 +1,5 @@
 BeforeAll {
-    $script:ModulePath = Join-Path $PSScriptRoot '..' 'src' 'Modules' 'NetworkControl.ps1'
+    $script:ModulePath = [IO.Path]::Combine($PSScriptRoot, '..', 'src', 'Modules', 'NetworkControl.ps1')
     . $script:ModulePath
 
     # Stub Windows-only cmdlets so Pester can mock them on non-Windows
