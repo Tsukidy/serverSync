@@ -102,6 +102,27 @@ function Test-ServerSyncConfig {
             if ($Config.update.backup_tag_count -and $Config.update.backup_tag_count -lt 1) {
                 $errors.Add("update.backup_tag_count must be >= 1")
             }
+            # If allowed_repos is present (whitelist mode), it must be a non-empty
+            # array and the configured repo_url must be exactly one of those.
+            # Defends against a config-write-to-malicious-upstream supply-chain
+            # attack on Update-ServerSync.
+            if ($Config.update.PSObject.Properties.Name -contains 'allowed_repos' -and
+                $null -ne $Config.update.allowed_repos) {
+                $allowed = @($Config.update.allowed_repos)
+                if ($allowed.Count -eq 0) {
+                    $errors.Add("update.allowed_repos, if present, must be a non-empty array")
+                }
+                foreach ($r in $allowed) {
+                    if (-not $r -or
+                        ($r -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://' -and $r -notmatch '^git@')) {
+                        $errors.Add("update.allowed_repos contains a non-URL entry: '$r'")
+                    }
+                }
+                if ($Config.update.repo_url -and $allowed.Count -gt 0 -and
+                    $allowed -notcontains $Config.update.repo_url) {
+                    $errors.Add("update.repo_url '$($Config.update.repo_url)' is not in update.allowed_repos")
+                }
+            }
         }
     }
 

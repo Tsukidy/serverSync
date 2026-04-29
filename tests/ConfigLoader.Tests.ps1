@@ -212,6 +212,61 @@ Describe 'ConfigLoader' -Tag 'Unit' {
             $result.Valid | Should -Be $false
             ($result.Errors -join ' ') | Should -Match 'branch'
         }
+
+        It 'accepts repo_url that is in allowed_repos whitelist' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config | Add-Member -MemberType NoteProperty -Name 'update' -Value ([PSCustomObject]@{
+                enabled = $true
+                repo_url = 'https://github.com/Tsukidy/serverSync.git'
+                branch = 'main'
+                install_root = 'C:\path'
+                allowed_repos = @('https://github.com/Tsukidy/serverSync.git', 'git@github.com:Tsukidy/serverSync.git')
+            }) -Force
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $true
+        }
+
+        It 'rejects repo_url not in allowed_repos whitelist' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config | Add-Member -MemberType NoteProperty -Name 'update' -Value ([PSCustomObject]@{
+                enabled = $true
+                repo_url = 'https://github.com/evil/serverSync.git'
+                branch = 'main'
+                install_root = 'C:\path'
+                allowed_repos = @('https://github.com/Tsukidy/serverSync.git')
+            }) -Force
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'allowed_repos'
+        }
+
+        It 'rejects malformed entries in allowed_repos' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config | Add-Member -MemberType NoteProperty -Name 'update' -Value ([PSCustomObject]@{
+                enabled = $true
+                repo_url = 'https://github.com/Tsukidy/serverSync.git'
+                branch = 'main'
+                install_root = 'C:\path'
+                allowed_repos = @('https://github.com/Tsukidy/serverSync.git', 'not-a-url')
+            }) -Force
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'not-a-url'
+        }
+
+        It 'rejects empty allowed_repos array' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config | Add-Member -MemberType NoteProperty -Name 'update' -Value ([PSCustomObject]@{
+                enabled = $true
+                repo_url = 'https://github.com/Tsukidy/serverSync.git'
+                branch = 'main'
+                install_root = 'C:\path'
+                allowed_repos = @()
+            }) -Force
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'allowed_repos'
+        }
     }
 
     Context 'Test-ServerSyncConfig validates robocopy.extra_flags allowlist' {
