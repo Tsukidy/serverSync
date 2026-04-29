@@ -2,6 +2,9 @@ BeforeAll {
     $script:ModulePath = [IO.Path]::Combine($PSScriptRoot, '..', 'src', 'Modules', 'ConfigLoader.ps1')
     $script:FixturesDir = Join-Path $PSScriptRoot 'fixtures'
     . $script:ModulePath
+    # Also load SyncOperations so Test-ServerSyncConfig can validate
+    # robocopy.extra_flags against the allowlist defined there.
+    . ([IO.Path]::Combine($PSScriptRoot, '..', 'src', 'Modules', 'SyncOperations.ps1'))
 }
 
 Describe 'ConfigLoader' -Tag 'Unit' {
@@ -208,6 +211,46 @@ Describe 'ConfigLoader' -Tag 'Unit' {
             $result = Test-ServerSyncConfig -Config $config
             $result.Valid | Should -Be $false
             ($result.Errors -join ' ') | Should -Match 'branch'
+        }
+    }
+
+    Context 'Test-ServerSyncConfig validates robocopy.extra_flags allowlist' {
+        It 'accepts valid extra_flags' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.robocopy.extra_flags = @('/COMPRESS', '/IPG:50')
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $true
+        }
+
+        It 'rejects /MIR in extra_flags (mirror is opt-in via retention.mode)' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.robocopy.extra_flags = @('/MIR')
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'extra_flags.*MIR'
+        }
+
+        It 'rejects /LOG path injection attempts' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.robocopy.extra_flags = @('/LOG:C:\ProgramData\ServerSync\config.json')
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'extra_flags'
+        }
+
+        It 'rejects unknown garbage flags' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.robocopy.extra_flags = @('/DOOM')
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'extra_flags'
+        }
+
+        It 'allows an empty extra_flags array' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.robocopy.extra_flags = @()
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $true
         }
     }
 }
