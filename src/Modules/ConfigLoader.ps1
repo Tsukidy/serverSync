@@ -42,27 +42,73 @@ function Test-ServerSyncConfig {
     }
 
     if ($Config.network) {
-        if (-not $Config.network.nics -or $Config.network.nics.Count -eq 0) {
+        # nics must be a non-empty array of strings, NOT a bare string. PowerShell
+        # promotes [string[]] from a string, but we want explicit arrays in
+        # config to avoid surprises and to make typos visible.
+        if (-not ($Config.network.nics -is [Array])) {
+            $errors.Add("network.nics must be an array (e.g., [`"Ethernet`"]) - bare strings not accepted")
+        }
+        elseif ($Config.network.nics.Count -eq 0) {
             $errors.Add("network.nics must be a non-empty array")
+        }
+        else {
+            foreach ($n in $Config.network.nics) {
+                if ([string]::IsNullOrWhiteSpace($n)) {
+                    $errors.Add("network.nics contains an empty/whitespace entry")
+                }
+            }
         }
         if (-not $Config.network.ready_check_host) {
             $errors.Add("network.ready_check_host is required")
         }
+        # ready_check_port is optional. If present must be a valid TCP port.
+        if ($null -ne $Config.network.ready_check_port) {
+            $p = $Config.network.ready_check_port
+            if ($p -lt 1 -or $p -gt 65535) {
+                $errors.Add("network.ready_check_port must be 1-65535")
+            }
+        }
     }
 
     if ($Config.retention) {
-        if ($Config.retention.default_mode -and
-            @('files','folders','mirror') -notcontains $Config.retention.default_mode) {
+        # default_mode is required so Resolve-RetentionPolicy never returns Mode=null.
+        if (-not $Config.retention.default_mode) {
+            $errors.Add("retention.default_mode is required ('files', 'folders', or 'mirror')")
+        }
+        elseif (@('files','folders','mirror') -notcontains $Config.retention.default_mode) {
             $errors.Add("retention.default_mode must be 'files', 'folders', or 'mirror'")
         }
-        if ($Config.retention.default_count -lt 1) {
+        if ($null -ne $Config.retention.default_count -and $Config.retention.default_count -lt 1) {
             $errors.Add("retention.default_count must be >= 1")
         }
     }
 
-    if ($Config.email -and $Config.email.enabled -and
+    # send_on is validated regardless of whether email.enabled is true, so a
+    # config with garbage send_on doesn't silently drift through GUI saves
+    # only to fail when enabled is later flipped.
+    if ($Config.email -and $Config.email.send_on -and
         @('failure','always','never') -notcontains $Config.email.send_on) {
         $errors.Add("email.send_on must be 'failure', 'always', or 'never'")
+    }
+    if ($Config.email -and $Config.email.enabled) {
+        # to must be a non-empty array of email-like strings
+        if (-not $Config.email.to) {
+            $errors.Add("email.to is required when email.enabled is true")
+        }
+        else {
+            $toList = @($Config.email.to)
+            if ($toList.Count -eq 0) {
+                $errors.Add("email.to must be a non-empty array when email.enabled is true")
+            }
+            foreach ($addr in $toList) {
+                if (-not $addr -or $addr -notmatch '^[^\s@]+@[^\s@]+\.[^\s@]+$') {
+                    $errors.Add("email.to contains an invalid address: '$addr'")
+                }
+            }
+        }
+        if (-not $Config.email.smtp_server -or $Config.email.smtp_server -match '\s') {
+            $errors.Add("email.smtp_server is required and must not contain whitespace when email.enabled is true")
+        }
     }
 
     # Validate robocopy.extra_flags against the allowlist if available.
@@ -102,6 +148,27 @@ function Test-ServerSyncConfig {
             if ($Config.update.backup_tag_count -and $Config.update.backup_tag_count -lt 1) {
                 $errors.Add("update.backup_tag_count must be >= 1")
             }
+            # If allowed_repos is present (whitelist mode), it must be a non-empty
+            # array and the configured repo_url must be exactly one of those.
+            # Defends against a config-write-to-malicious-upstream supply-chain
+            # attack on Update-ServerSync.
+            if ($Config.update.PSObject.Properties.Name -contains 'allowed_repos' -and
+                $null -ne $Config.update.allowed_repos) {
+                $allowed = @($Config.update.allowed_repos)
+                if ($allowed.Count -eq 0) {
+                    $errors.Add("update.allowed_repos, if present, must be a non-empty array")
+                }
+                foreach ($r in $allowed) {
+                    if (-not $r -or
+                        ($r -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://' -and $r -notmatch '^git@')) {
+                        $errors.Add("update.allowed_repos contains a non-URL entry: '$r'")
+                    }
+                }
+                if ($Config.update.repo_url -and $allowed.Count -gt 0 -and
+                    $allowed -notcontains $Config.update.repo_url) {
+                    $errors.Add("update.repo_url '$($Config.update.repo_url)' is not in update.allowed_repos")
+                }
+            }
         }
     }
 
@@ -119,12 +186,63 @@ function Test-ServerSyncConfig {
                 }
             }
 
+            # Shape-validate source: UNC path \\server\share\... or local
+            # absolute path C:\... - reject wildcards and parent-traversal.
+            if ($pair.source) {
+                if ($pair.source -match '[\*\?<>\|"]') {
+                    $errors.Add("pair '$n' source contains wildcard or invalid path char: '$($pair.source)'")
+                }
+                elseif ($pair.source -match '(^|[\\/])\.\.([\\/]|$)') {
+                    $errors.Add("pair '$n' source contains parent-traversal '..': '$($pair.source)'")
+                }
+                elseif ($pair.source -notmatch '^(\\\\[^\\]+\\.+|[A-Za-z]:\\.+)') {
+                    $errors.Add("pair '$n' source must be a UNC path (\\\\server\\share\\...) or a drive-letter path (C:\\...)")
+                }
+            }
+
+            # Shape-validate destination: drive-letter local path only. Reject
+            # UNC (writes to remote shares cross the air gap), wildcards, parent-traversal.
+            if ($pair.destination) {
+                if ($pair.destination -match '[\*\?<>\|"]') {
+                    $errors.Add("pair '$n' destination contains wildcard or invalid path char: '$($pair.destination)'")
+                }
+                elseif ($pair.destination -match '(^|[\\/])\.\.([\\/]|$)') {
+                    $errors.Add("pair '$n' destination contains parent-traversal '..': '$($pair.destination)'")
+                }
+                elseif ($pair.destination -notmatch '^[A-Za-z]:\\') {
+                    $errors.Add("pair '$n' destination must be a local drive-letter path (e.g., D:\\AirgappedBackups\\X)")
+                }
+            }
+
+            # credential_target shape - simple ASCII identifier.
+            if ($pair.credential_target -and $pair.credential_target -notmatch '^[A-Za-z0-9_.\-]{1,64}$') {
+                $errors.Add("pair '$n' credential_target must be alphanumeric/_/-/./, max 64 chars")
+            }
+
+            # Tags shape - alphanumeric, dot, dash, underscore only.
+            if ($pair.tags) {
+                foreach ($t in @($pair.tags)) {
+                    if ($t -notmatch '^[A-Za-z0-9_.\-]{1,40}$') {
+                        $errors.Add("pair '$n' tag '$t' contains invalid characters or is too long (allowed: A-Z a-z 0-9 _ . - max 40)")
+                    }
+                }
+            }
+
             if ($pair.retention) {
                 if ($pair.retention.mode -and @('files','folders','mirror') -notcontains $pair.retention.mode) {
                     $errors.Add("pair '$n' retention.mode must be 'files', 'folders', or 'mirror'")
                 }
-                if ($pair.retention.count -and $pair.retention.count -lt 1) {
+                # Use $null -ne instead of truthiness so count: 0 is properly
+                # rejected (truthiness check on 0 short-circuits).
+                if ($null -ne $pair.retention.count -and $pair.retention.count -lt 1) {
                     $errors.Add("pair '$n' retention.count must be >= 1")
+                }
+                if ($pair.retention.extensions) {
+                    foreach ($ext in @($pair.retention.extensions)) {
+                        if ($ext -notmatch '^\.?[A-Za-z0-9]{1,16}$') {
+                            $errors.Add("pair '$n' retention.extensions contains invalid extension: '$ext'")
+                        }
+                    }
                 }
             }
         }
@@ -181,7 +299,10 @@ function Resolve-RetentionPolicy {
     $mode = if ($pairRetention -and $pairRetention.mode) { $pairRetention.mode }
             else { $Defaults.default_mode }
 
-    $count = if ($pairRetention -and $pairRetention.count) { $pairRetention.count }
+    # Use $null -ne checks so count: 0 is preserved as user intent (validator
+    # already rejects count < 1, so 0 cannot reach here in production - but
+    # the explicit null-check is the right pattern for falsy-zero values).
+    $count = if ($pairRetention -and $null -ne $pairRetention.count) { $pairRetention.count }
              else { $Defaults.default_count }
 
     $extensions = @()

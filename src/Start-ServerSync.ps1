@@ -68,12 +68,22 @@ $nicsEnabled = $false
 
 try {
     if ($PSCmdlet.ShouldProcess('NICs', "Enable $($config.network.nics -join ', ')")) {
-        Enable-ServerSyncNics -Names $config.network.nics
+        # Set $nicsEnabled BEFORE calling Enable-ServerSyncNics. If Enable
+        # partially succeeds (some NICs up, then one throws on Group Policy),
+        # the finally block must still run the disable + verify - otherwise
+        # a partially-enabled state would never be torn down.
         $nicsEnabled = $true
+        Enable-ServerSyncNics -Names $config.network.nics
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "NICs enabled"
 
-        if (-not (Wait-NetworkReady -TargetHost $config.network.ready_check_host -TimeoutSeconds $config.network.ready_timeout_seconds)) {
-            throw "Network not ready after $($config.network.ready_timeout_seconds)s (host: $($config.network.ready_check_host))"
+        $readyArgs = @{
+            TargetHost = $config.network.ready_check_host
+            TimeoutSeconds = $config.network.ready_timeout_seconds
+        }
+        if ($config.network.ready_check_port) { $readyArgs['Port'] = [int]$config.network.ready_check_port }
+        if (-not (Wait-NetworkReady @readyArgs)) {
+            $portMsg = if ($readyArgs.Port) { ":$($readyArgs.Port)" } else { '' }
+            throw "Network not ready after $($config.network.ready_timeout_seconds)s (host: $($config.network.ready_check_host)$portMsg)"
         }
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Network ready"
     }
@@ -172,26 +182,54 @@ finally {
         }
         if (-not $allDown) {
             Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message 'CRITICAL: NIC disable could not be verified' -AlsoEventLog
-            # Urgent email
+            # Urgent email - include adapter status snapshot and log tail so
+            # responders have actionable diagnostics rather than just
+            # 'investigate immediately'.
             try {
                 $smtpCred = $null
                 if ($config.email.enabled -and $config.email.credential_target) {
                     $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
                 }
+                $adapterReport = ''
+                try {
+                    $adapterReport = (Get-NetAdapter | Format-Table Name, Status, InterfaceDescription -AutoSize | Out-String)
+                } catch {}
+                $tail = Get-LogTail -Path $logger.LogPath -MaxLines 50 -MaxBytes 16KB
+                $urgentBody = @(
+                    "Host: $env:COMPUTERNAME"
+                    "NICs may still be active. Investigate IMMEDIATELY."
+                    ""
+                    "--- Get-NetAdapter ---"
+                    $adapterReport
+                    "--- log tail ---"
+                    $tail
+                ) -join [Environment]::NewLine
                 Send-ServerSyncEmail -Config $config.email `
                     -Subject '[URGENT] ServerSync: NIC DISABLE VERIFICATION FAILED' `
-                    -Body "Host: $env:COMPUTERNAME`nNICs may still be active. Investigate immediately." `
+                    -Body $urgentBody `
                     -Credential $smtpCred -HasFailures $true
-            } catch {}
+            }
+            catch {
+                Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Urgent email send failed: $($_.Exception.Message)"
+            }
             exit 3
         }
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message 'NICs verified disabled'
     }
 
+    # Belt-and-suspenders: clean up any per-pair PSDrives that escaped their
+    # inner finally (e.g., a robocopy child that held a handle when we tried
+    # to remove). Logged so we know if it ever happens.
+    Get-PSDrive -Name 'sssync_*' -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-ServerSyncLog -Logger $logger -Level 'WARN' -Message "Stranded PSDrive removed: $($_.Name)"
+        Remove-PSDrive -Name $_.Name -Force -ErrorAction SilentlyContinue
+    }
+
     Remove-OldLogFiles -LogDirectory $config.logging.log_directory -RetentionDays $config.logging.log_retention_days
 }
 
-# Summary email
+# Summary email - send a tail of the log, not the entire file. Bounded body
+# size keeps SMTP payloads reasonable and reduces accidental data exposure.
 try {
     if ($config.email.enabled) {
         $smtpCred = $null
@@ -199,9 +237,10 @@ try {
             $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
         }
         $status = if ($hasFailures) { 'FAILURES' } else { 'OK' }
+        $body = Get-LogTail -Path $logger.LogPath -MaxLines 200 -MaxBytes 64KB
         Send-ServerSyncEmail -Config $config.email `
             -Subject "[ServerSync] $status on $env:COMPUTERNAME" `
-            -Body (Get-Content -Raw $logger.LogPath) `
+            -Body $body `
             -Credential $smtpCred -HasFailures $hasFailures
     }
 } catch {

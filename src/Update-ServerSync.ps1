@@ -28,13 +28,53 @@ if (-not $ConfigPath) {
     $ConfigPath = [IO.Path]::Combine($PSScriptRoot, '..', 'config', 'config.json')
 }
 
+# Resolve trusted absolute paths to git and powershell BEFORE doing anything
+# else. Looking these up via $PATH is a supply-chain risk: an attacker who
+# can drop a same-named binary earlier in PATH (e.g., into a user-writable
+# Chocolatey/scoop directory) would intercept every git/powershell call we
+# make, defeating the rollback contract.
+function Resolve-TrustedExecutable {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string[]]$AcceptedRoots
+    )
+    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        throw "$Name not found on PATH"
+    }
+    $resolved = $cmd | Select-Object -First 1 -ExpandProperty Source
+    foreach ($root in $AcceptedRoots) {
+        if ($resolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            return $resolved
+        }
+    }
+    throw "$Name resolved to an untrusted path: $resolved (must be under one of: $($AcceptedRoots -join '; '))"
+}
+
+$gitExe        = Resolve-TrustedExecutable -Name 'git' -AcceptedRoots @(
+    "${env:ProgramFiles}\Git\",
+    "${env:ProgramFiles(x86)}\Git\",
+    "${env:ProgramW6432}\Git\"
+)
+# powershell.exe and pwsh.exe both have stable absolute homes; do NOT trust PATH.
+$psExe = if (Test-Path -LiteralPath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe") {
+    "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+}
+elseif (Test-Path -LiteralPath "$env:ProgramFiles\PowerShell\7\pwsh.exe") {
+    "$env:ProgramFiles\PowerShell\7\pwsh.exe"
+}
+else {
+    throw "No trusted PowerShell executable found at the expected absolute paths."
+}
+
 # Load modules
 $modulesDir = Join-Path $PSScriptRoot 'Modules'
 . (Join-Path $modulesDir 'ConfigLoader.ps1')
 . (Join-Path $modulesDir 'Logging.ps1')
 . (Join-Path $modulesDir 'NetworkControl.ps1')
+. (Join-Path $modulesDir 'SyncOperations.ps1')
 
-# Load + validate config
+# Load + validate config (extra_flags allowlist requires SyncOperations be loaded)
 $config = Read-ServerSyncConfig -Path $ConfigPath
 $validation = Test-ServerSyncConfig -Config $config
 if (-not $validation.Valid) {
@@ -44,7 +84,7 @@ if (-not $validation.Valid) {
 }
 
 # Update must be enabled
-if (-not $config.PSObject.Properties.Name -contains 'update' -or
+if (-not ($config.PSObject.Properties.Name -contains 'update') -or
     -not $config.update -or
     -not $config.update.enabled) {
     [Console]::Error.WriteLine("update.enabled is not set to true in config. Refusing to run.")
@@ -55,6 +95,17 @@ $installRoot = $config.update.install_root
 $repoUrl     = $config.update.repo_url
 $branch      = $config.update.branch
 $tagCount    = if ($config.update.backup_tag_count) { [int]$config.update.backup_tag_count } else { 3 }
+
+# Allowed-repos whitelist: if update.allowed_repos is present, repo_url must
+# match one of those exact strings. Defends against config-write-to-malicious-
+# upstream supply-chain attack.
+if ($config.update.allowed_repos) {
+    $allowed = @($config.update.allowed_repos)
+    if ($allowed.Count -gt 0 -and $allowed -notcontains $repoUrl) {
+        [Console]::Error.WriteLine("update.repo_url '$repoUrl' is not in update.allowed_repos. Refusing to run.")
+        exit 2
+    }
+}
 
 # install_root must exist and be a git working directory
 if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
@@ -88,17 +139,20 @@ $logger = New-ServerSyncLogger -LogDirectory $config.logging.log_directory `
                                 -EventLogSource $config.logging.event_log_source
 
 Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Update starting. install_root=$installRoot branch=$branch"
+Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Trusted git: $gitExe"
+Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Trusted ps:  $psExe"
 
 $nicsEnabled = $false
 $rollbackTag = $null
 $updateApplied = $false
 $prevHead = $null
+$newHead = $null
 
 try {
     # Capture pre-update HEAD for diagnostic logging (independent of tag)
     Push-Location -LiteralPath $installRoot
     try {
-        $prevHead = (& git rev-parse HEAD 2>$null).Trim()
+        $prevHead = (& $gitExe rev-parse HEAD 2>$null).Trim()
         if ($LASTEXITCODE -ne 0 -or -not $prevHead) {
             throw "git rev-parse HEAD failed in $installRoot"
         }
@@ -107,47 +161,59 @@ try {
         Pop-Location
     }
 
-    # Enable NICs
+    # Enable NICs - set $nicsEnabled FIRST so the finally block always
+    # disables and verifies, even if Enable-ServerSyncNics partially
+    # succeeds and then throws.
     if ($PSCmdlet.ShouldProcess('NICs', "Enable $($config.network.nics -join ', ')")) {
-        Enable-ServerSyncNics -Names $config.network.nics
         $nicsEnabled = $true
+        Enable-ServerSyncNics -Names $config.network.nics
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "NICs enabled"
 
-        if (-not (Wait-NetworkReady -TargetHost $config.network.ready_check_host -TimeoutSeconds $config.network.ready_timeout_seconds)) {
-            throw "Network not ready after $($config.network.ready_timeout_seconds)s (host: $($config.network.ready_check_host))"
+        $readyArgs = @{
+            TargetHost = $config.network.ready_check_host
+            TimeoutSeconds = $config.network.ready_timeout_seconds
+        }
+        if ($config.network.ready_check_port) { $readyArgs['Port'] = [int]$config.network.ready_check_port }
+        if (-not (Wait-NetworkReady @readyArgs)) {
+            $portMsg = if ($readyArgs.Port) { ":$($readyArgs.Port)" } else { '' }
+            throw "Network not ready after $($config.network.ready_timeout_seconds)s (host: $($config.network.ready_check_host)$portMsg)"
         }
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Network ready"
     }
 
     Push-Location -LiteralPath $installRoot
     try {
-        # Rollback point
-        $rollbackTag = "serversync-pre-update-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        & git tag --force $rollbackTag $prevHead 2>&1 | Out-Null
+        # Rollback point. Append a short GUID so two updates within the same
+        # second cannot collide and one cannot clobber the other.
+        $tagSuffix = [Guid]::NewGuid().ToString('N').Substring(0,4)
+        $rollbackTag = "serversync-pre-update-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$tagSuffix"
+        & $gitExe tag $rollbackTag $prevHead 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "git tag failed" }
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Rollback tag created: $rollbackTag"
 
-        # Update remote URL (handles repo URL changes)
-        & git remote set-url origin $repoUrl 2>&1 | Out-Null
+        # Update remote URL (handles repo URL changes within the allowlist)
+        & $gitExe remote set-url origin $repoUrl 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "git remote set-url failed" }
 
-        # Fetch + reset
-        & git fetch origin --tags --prune 2>&1 | ForEach-Object {
+        # Fetch branches only (NOT tags) - rollback tags are local-only and
+        # we don't want a hostile upstream to be able to delete them via
+        # --prune semantics.
+        & $gitExe fetch origin --prune 2>&1 | ForEach-Object {
             Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  git: $_"
         }
         if ($LASTEXITCODE -ne 0) { throw "git fetch failed" }
 
-        & git checkout $branch 2>&1 | ForEach-Object {
+        & $gitExe checkout $branch 2>&1 | ForEach-Object {
             Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  git: $_"
         }
         if ($LASTEXITCODE -ne 0) { throw "git checkout $branch failed" }
 
-        & git reset --hard "origin/$branch" 2>&1 | ForEach-Object {
+        & $gitExe reset --hard "origin/$branch" 2>&1 | ForEach-Object {
             Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  git: $_"
         }
         if ($LASTEXITCODE -ne 0) { throw "git reset --hard origin/$branch failed" }
 
-        $newHead = (& git rev-parse HEAD).Trim()
+        $newHead = (& $gitExe rev-parse HEAD).Trim()
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Post-update HEAD: $newHead"
         $updateApplied = ($newHead -ne $prevHead)
         if (-not $updateApplied) {
@@ -155,11 +221,11 @@ try {
         }
 
         # Rotate old rollback tags (keep newest $tagCount including the new one)
-        $allTags = & git tag --list 'serversync-pre-update-*' | Sort-Object -Descending
+        $allTags = & $gitExe tag --list 'serversync-pre-update-*' | Sort-Object -Descending
         if ($allTags.Count -gt $tagCount) {
             $toDelete = $allTags | Select-Object -Skip $tagCount
             foreach ($t in $toDelete) {
-                & git tag -d $t 2>&1 | Out-Null
+                & $gitExe tag -d $t 2>&1 | Out-Null
                 Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Pruned old rollback tag: $t"
             }
         }
@@ -194,9 +260,23 @@ finally {
                 if ($config.email.enabled -and $config.email.credential_target) {
                     $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
                 }
+                $adapterReport = ''
+                try {
+                    $adapterReport = (Get-NetAdapter | Format-Table Name, Status, InterfaceDescription -AutoSize | Out-String)
+                } catch {}
+                $tail = Get-LogTail -Path $logger.LogPath -MaxLines 50 -MaxBytes 16KB
+                $urgentBody = @(
+                    "Host: $env:COMPUTERNAME"
+                    "NICs may still be active after update. Investigate IMMEDIATELY."
+                    ""
+                    "--- Get-NetAdapter ---"
+                    $adapterReport
+                    "--- log tail ---"
+                    $tail
+                ) -join [Environment]::NewLine
                 Send-ServerSyncEmail -Config $config.email `
                     -Subject '[URGENT] ServerSync Update: NIC DISABLE VERIFICATION FAILED' `
-                    -Body "Host: $env:COMPUTERNAME`nNICs may still be active after update. Investigate immediately." `
+                    -Body $urgentBody `
                     -Credential $smtpCred -HasFailures $true
             } catch {
                 Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Urgent email send failed: $($_.Exception.Message)"
@@ -215,7 +295,7 @@ if ($script:fatalError) {
         Write-ServerSyncLog -Logger $logger -Level 'WARN' -Message "Attempting rollback to $prevHead due to fatal error"
         Push-Location -LiteralPath $installRoot
         try {
-            & git reset --hard $prevHead 2>&1 | Out-Null
+            & $gitExe reset --hard $prevHead 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Rollback complete"
                 exit 4
@@ -235,10 +315,9 @@ if ($script:fatalError) {
 $smokeScript = Join-Path $installRoot 'src\Start-ServerSync.ps1'
 if (-not (Test-Path -LiteralPath $smokeScript)) {
     Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Smoke test script not found post-update: $smokeScript" -AlsoEventLog
-    # Roll back
     Push-Location -LiteralPath $installRoot
     try {
-        & git reset --hard $prevHead 2>&1 | Out-Null
+        & $gitExe reset --hard $prevHead 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Rollback complete"
             exit 4
@@ -248,18 +327,54 @@ if (-not (Test-Path -LiteralPath $smokeScript)) {
     } finally { Pop-Location }
 }
 
-Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Running smoke test: -ValidateConfig"
-& powershell -NoProfile -File $smokeScript -ValidateConfig -ConfigPath $ConfigPath 2>&1 |
-    ForEach-Object { Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  smoke: $_" }
+Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Running smoke test: -ValidateConfig + module spot-checks"
+# The smoke test is intentionally an inline script so we exercise more than
+# just config parsing. Each module-level call below catches the case where a
+# bad upstream commit broke a module without breaking config-only validation.
+$smokeArgs = @(
+    '-NoProfile'
+    '-Command'
+    @"
+`$ErrorActionPreference = 'Stop'
+try {
+    & '$smokeScript' -ValidateConfig -ConfigPath '$ConfigPath'
+    if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
+
+    # Spot-check that key module functions still parse and execute. A
+    # malformed function signature won't surface from -ValidateConfig.
+    `$modDir = Join-Path '$installRoot' 'src\Modules'
+    . (Join-Path `$modDir 'SyncOperations.ps1')
+    . (Join-Path `$modDir 'Retention.ps1')
+    . (Join-Path `$modDir 'NetworkControl.ps1')
+    if (-not (Test-RobocopyFlag -Flag '/COMPRESS')) { throw 'Test-RobocopyFlag broken' }
+    if ((ConvertFrom-RobocopyExitCode -ExitCode 0).Description -notmatch 'no') { throw 'ConvertFrom-RobocopyExitCode broken' }
+    `$tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path `$tmpRoot)
+    try {
+        if (-not (Test-PathContainedIn -Candidate `$tmpRoot -Root `$tmpRoot)) {
+            throw 'Test-PathContainedIn broken'
+        }
+    } finally {
+        Remove-Item -Recurse -Force -LiteralPath `$tmpRoot -ErrorAction SilentlyContinue
+    }
+    exit 0
+}
+catch {
+    [Console]::Error.WriteLine("smoke: `$(`$_.Exception.Message)")
+    exit 1
+}
+"@
+)
+& $psExe @smokeArgs 2>&1 | ForEach-Object { Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  smoke: $_" }
 $smokeExit = $LASTEXITCODE
 
 if ($smokeExit -ne 0) {
-    Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Smoke test FAILED (exit $smokeExit). Rolling back to $prevHead." -AlsoEventLog
+    Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Smoke test FAILED (exit $smokeExit). Rolling back from $newHead to $prevHead." -AlsoEventLog
 
     Push-Location -LiteralPath $installRoot
     $rollbackOk = $false
     try {
-        & git reset --hard $prevHead 2>&1 | Out-Null
+        & $gitExe reset --hard $prevHead 2>&1 | Out-Null
         $rollbackOk = ($LASTEXITCODE -eq 0)
     } finally {
         Pop-Location
@@ -274,7 +389,7 @@ if ($smokeExit -ne 0) {
         $bodyStatus = if ($rollbackOk) { 'rolled back to ' + $prevHead } else { 'ROLLBACK ALSO FAILED - install state unknown' }
         Send-ServerSyncEmail -Config $config.email `
             -Subject "[ServerSync] Update failed smoke test on $env:COMPUTERNAME" `
-            -Body "Update from $repoUrl branch $branch failed smoke test (exit $smokeExit). $bodyStatus.`nSee log: $($logger.LogPath)" `
+            -Body "Update from $repoUrl branch $branch failed smoke test (exit $smokeExit).`nFailed commit: $newHead`nPrevious commit: $prevHead`n$bodyStatus.`nSee log: $($logger.LogPath)" `
             -Credential $smtpCred -HasFailures $true
     } catch {
         Write-ServerSyncLog -Logger $logger -Level 'WARN' -Message "Email send failed: $($_.Exception.Message)"
@@ -301,7 +416,7 @@ try {
         }
         Send-ServerSyncEmail -Config $config.email `
             -Subject "[ServerSync] Update applied successfully on $env:COMPUTERNAME" `
-            -Body "Update from $repoUrl branch $branch applied successfully.`nPrevious: $prevHead`nSee log: $($logger.LogPath)" `
+            -Body "Update from $repoUrl branch $branch applied successfully.`nPrevious: $prevHead`nNew:      $newHead`nSee log: $($logger.LogPath)" `
             -Credential $smtpCred -HasFailures $false
     }
 } catch {

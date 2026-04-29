@@ -36,13 +36,64 @@ Describe 'Logging - file logger' -Tag 'Unit' {
         $content | Should -Match 'WARN.*hmm'
     }
 
-    It 'Remove-OldLogFiles deletes files older than retention' {
+    It 'Remove-OldLogFiles deletes .log files older than retention' {
         $old = New-Item -ItemType File -Path (Join-Path $script:TmpDir 'old.log')
         $old.LastWriteTime = (Get-Date).AddDays(-100)
         $new = New-Item -ItemType File -Path (Join-Path $script:TmpDir 'new.log')
         Remove-OldLogFiles -LogDirectory $script:TmpDir -RetentionDays 90
         Test-Path $old.FullName | Should -Be $false
         Test-Path $new.FullName | Should -Be $true
+    }
+
+    It 'Remove-OldLogFiles does NOT touch non-.log files (state.json, forensic captures, etc.)' {
+        $oldLog = New-Item -ItemType File -Path (Join-Path $script:TmpDir 'old.log')
+        $oldLog.LastWriteTime = (Get-Date).AddDays(-200)
+        $stateJson = New-Item -ItemType File -Path (Join-Path $script:TmpDir 'state.json')
+        $stateJson.LastWriteTime = (Get-Date).AddDays(-200)
+        $forensic = New-Item -ItemType File -Path (Join-Path $script:TmpDir 'capture.bin')
+        $forensic.LastWriteTime = (Get-Date).AddDays(-200)
+
+        Remove-OldLogFiles -LogDirectory $script:TmpDir -RetentionDays 90
+
+        Test-Path $oldLog.FullName    | Should -Be $false
+        Test-Path $stateJson.FullName | Should -Be $true
+        Test-Path $forensic.FullName  | Should -Be $true
+    }
+}
+
+Describe 'Logging - Get-LogTail' -Tag 'Unit' {
+    BeforeEach {
+        $script:TmpDir = Join-Path ([IO.Path]::GetTempPath()) ("logtail-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:TmpDir | Out-Null
+    }
+    AfterEach {
+        if (Test-Path $script:TmpDir) { Remove-Item -Recurse -Force $script:TmpDir }
+    }
+
+    It 'returns empty string for missing file' {
+        $missing = Join-Path $script:TmpDir 'nope.log'
+        Get-LogTail -Path $missing | Should -Be ''
+    }
+
+    It 'returns the last N lines of a small file' {
+        $log = Join-Path $script:TmpDir 'small.log'
+        1..50 | ForEach-Object { Add-Content -LiteralPath $log -Value "line$_" }
+        $tail = Get-LogTail -Path $log -MaxLines 5 -MaxBytes 64KB
+        $tail | Should -Match 'line50'
+        $tail | Should -Match 'line46'
+        $tail | Should -Not -Match 'line40'
+    }
+
+    It 'caps body at MaxBytes for very large files' {
+        $log = Join-Path $script:TmpDir 'big.log'
+        # Write ~256KB of content.
+        $line = ('x' * 1000) + "`n"
+        1..260 | ForEach-Object { Add-Content -LiteralPath $log -Value $line -NoNewline }
+        $tail = Get-LogTail -Path $log -MaxLines 1000 -MaxBytes 8KB
+        # The header indicates truncation
+        $tail | Should -Match 'showing last'
+        # Tail shouldn't be the entire file
+        $tail.Length | Should -BeLessOrEqual 16384
     }
 }
 

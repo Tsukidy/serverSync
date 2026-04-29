@@ -35,7 +35,10 @@
     "repo_url": "https://github.com/Tsukidy/serverSync.git",
     "branch": "main",
     "install_root": "C:\\Program Files\\ServerSync",
-    "backup_tag_count": 3
+    "backup_tag_count": 3,
+    "allowed_repos": [
+      "https://github.com/Tsukidy/serverSync.git"
+    ]
   },
   "folder_pairs": [
     {

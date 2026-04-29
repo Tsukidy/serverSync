@@ -10,6 +10,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Validate ConfigPath shape BEFORE doing anything else - the value flows
+# into the elevated re-launch's command line, so a value containing quote
+# characters would close the quoted region and let the rest be parsed as
+# command-line tokens. Restrict to drive-letter paths ending in .json.
+if ($ConfigPath -and $ConfigPath -notmatch '^[A-Za-z]:\\[^"<>|]+\.json$') {
+    [Console]::Error.WriteLine("ConfigPath must be an absolute drive-letter path ending in .json with no quote/redirection characters.")
+    exit 2
+}
+
 # Self-elevate for Task Scheduler modifications
 $isAdmin = ([Security.Principal.WindowsPrincipal]`
     [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -135,9 +144,20 @@ function Save-Config {
         [void][System.Windows.Forms.MessageBox]::Show("Invalid:`n$($validation.Errors -join "`n")",'ServerSync',0,16)
         return
     }
-    $tmp = "$ConfigPath.tmp"
-    $script:WorkingConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $tmp -Encoding UTF8
-    Move-Item -Force $tmp $ConfigPath
+    # Write the new content into the EXISTING config file, preserving the
+    # destination's NTFS object identity (and therefore its ACL). Move-Item
+    # would replace the destination's NTFS object with the temp file's, which
+    # inherits ACLs from the parent at that moment - any previously stricter
+    # explicit ACL on the config file would be lost.
+    $newJson = $script:WorkingConfig | ConvertTo-Json -Depth 10
+    if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
+        Set-Content -LiteralPath $ConfigPath -Value $newJson -Encoding UTF8
+    }
+    else {
+        # First-time create: write directly. ACLs will inherit from the
+        # parent (which the installer locked down).
+        Set-Content -LiteralPath $ConfigPath -Value $newJson -Encoding UTF8
+    }
     [void][System.Windows.Forms.MessageBox]::Show('Saved.','ServerSync',0,64)
 }
 
@@ -199,7 +219,20 @@ function Edit-Pair {
         if ($fields['retention_extensions (comma)'].Text) {
             $retention['extensions'] = @($fields['retention_extensions (comma)'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         }
-        if ($fields['retention_count'].Text) { $retention['count'] = [int]$fields['retention_count'].Text }
+        # TryParse so a non-numeric retention_count value surfaces as a
+        # readable error rather than crashing the dialog with an unhandled
+        # InvalidCastException.
+        if ($fields['retention_count'].Text) {
+            $parsed = 0
+            if ([int]::TryParse($fields['retention_count'].Text, [ref]$parsed)) {
+                $retention['count'] = $parsed
+            }
+            else {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    "retention_count must be a positive integer (got '$($fields['retention_count'].Text)').",'Invalid retention_count',0,16)
+                return $null
+            }
+        }
     }
 
     $out = [ordered]@{
@@ -373,32 +406,37 @@ function Refresh-Credentials {
 
 function Prompt-AddCredential {
     param($Target)
-    $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Set credential: $Target"
-    $dlg.Size = New-Object System.Drawing.Size(400, 180)
-    $dlg.StartPosition = 'CenterParent'
+    # Use the built-in PowerShell Get-Credential dialog, which returns a
+    # PSCredential whose Password is a SecureString. The cleartext password
+    # is never materialized as a managed [string] (the previous WinForms
+    # TextBox-based dialog left the password in $tbP.Text in the .NET String
+    # interning table for the GC's pleasure - recoverable from a memory
+    # dump, exactly the threat model the user called out).
+    $cred = $Host.UI.PromptForCredential(
+        "Set credential: $Target",
+        "Enter the username and password to store under target name '$Target'.",
+        '',
+        ''
+    )
+    if (-not $cred) { return }
 
-    $lblU = New-Object System.Windows.Forms.Label -Property @{ Text='UserName:'; Location='10,20'; Size='80,20' }
-    $tbU = New-Object System.Windows.Forms.TextBox -Property @{ Location='100,20'; Size='270,20' }
-    $lblP = New-Object System.Windows.Forms.Label -Property @{ Text='Password:'; Location='10,50'; Size='80,20' }
-    $tbP = New-Object System.Windows.Forms.TextBox -Property @{ Location='100,50'; Size='270,20'; UseSystemPasswordChar=$true }
-    $ok = New-Object System.Windows.Forms.Button -Property @{ Text='OK'; DialogResult='OK'; Location='200,90' }
-    $cancel = New-Object System.Windows.Forms.Button -Property @{ Text='Cancel'; DialogResult='Cancel'; Location='290,90' }
-    $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
-    $dlg.Controls.AddRange(@($lblU,$tbU,$lblP,$tbP,$ok,$cancel))
-    if ($dlg.ShowDialog() -ne 'OK') { return }
-
-    $secure = ConvertTo-SecureString -String $tbP.Text -AsPlainText -Force
     try {
         if (Get-StoredCredential -Target $Target -ErrorAction SilentlyContinue) {
             Remove-StoredCredential -Target $Target
         }
-        New-StoredCredential -Target $Target -UserName $tbU.Text -SecurePassword $secure `
+        # New-StoredCredential -SecurePassword takes the SecureString directly.
+        New-StoredCredential -Target $Target -UserName $cred.UserName -SecurePassword $cred.Password `
             -Persist LocalMachine -Type Generic | Out-Null
         Refresh-Credentials
     }
     catch {
         [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Error',0,16)
+    }
+    finally {
+        # Defensive disposal of the SecureString. The PSCredential's underlying
+        # SecureString may be reused by the host; calling Dispose on a
+        # detached copy would also help. Best-effort.
+        if ($cred -and $cred.Password) { try { $cred.Password.Dispose() } catch {} }
     }
 }
 
@@ -530,10 +568,40 @@ function Prompt-AddSchedule {
 
     if ($dlg.ShowDialog() -ne 'OK') { return }
 
-    if (-not $tbName.Text) { return }
-
+    # Strict input validation. Any of these strings flows into a command line
+    # registered as a Task Scheduler action that runs as Local Admin (or the
+    # supplied run-as account). Garbage characters could inject extra
+    # parameters - e.g., a tag of 'daily; & C:\evil.ps1' would split when
+    # Task Scheduler parses the arguments. Refuse before composing.
+    $taskName = $tbName.Text
+    if (-not $taskName -or $taskName -notmatch '^[A-Za-z0-9_. -]{1,80}$') {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            'Task name must be 1-80 characters: A-Z a-z 0-9 _ . space and -.','Invalid task name',0,16)
+        return
+    }
+    $runAsUser = $tbUser.Text
+    if (-not $runAsUser -or $runAsUser -notmatch '^[A-Za-z0-9_.\-\\@]{1,128}$') {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            'Run-as user must be 1-128 characters: A-Z a-z 0-9 _ . - \ @ (DOMAIN\user or user@domain).','Invalid user',0,16)
+        return
+    }
+    if ($tbTime.Text -notmatch '^([01]?\d|2[0-3]):([0-5]\d)$') {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            'Time must be in HH:mm 24-hour format (e.g., 02:00 or 14:30).','Invalid time',0,16)
+        return
+    }
     $hh,$mm = $tbTime.Text -split ':'
     $at = (Get-Date).Date.AddHours([int]$hh).AddMinutes([int]$mm)
+
+    $tag = $null
+    if ($cbTag.SelectedItem -and $cbTag.SelectedItem -ne '(no filter — default run)') {
+        $tag = [string]$cbTag.SelectedItem
+        if ($tag -notmatch '^[A-Za-z0-9_.\-]{1,40}$') {
+            [void][System.Windows.Forms.MessageBox]::Show(
+                "Tag '$tag' contains invalid characters. The config file may have been tampered with.",'Invalid tag',0,16)
+            return
+        }
+    }
 
     $trigger = switch ($cbType.SelectedItem) {
         'Daily'  { New-ScheduledTaskTrigger -Daily -At $at }
@@ -543,17 +611,15 @@ function Prompt-AddSchedule {
 
     $scriptPath = Join-Path $PSScriptRoot 'Start-ServerSync.ps1'
     $taskArgs = "-NoProfile -File `"$scriptPath`""
-    if ($cbTag.SelectedItem -and $cbTag.SelectedItem -ne '(no filter — default run)') {
-        $taskArgs += " -Tag $($cbTag.SelectedItem)"
-    }
+    if ($tag) { $taskArgs += " -Tag $tag" }
 
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
     try {
-        Register-ScheduledTask -TaskName $tbName.Text -TaskPath $script:TaskFolder `
+        Register-ScheduledTask -TaskName $taskName -TaskPath $script:TaskFolder `
             -Action $action -Trigger $trigger -Settings $settings `
-            -User $tbUser.Text -RunLevel Highest -Force | Out-Null
+            -User $runAsUser -RunLevel Highest -Force | Out-Null
         Refresh-ScheduledTasks
     }
     catch {

@@ -14,6 +14,7 @@ the source servers it reads from.
 - [First test run](#first-test-run)
 - [Scheduling](#scheduling)
 - [Operations](#operations)
+- [Code-integrity controls (script tampering)](#code-integrity-controls-script-tampering)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -600,6 +601,61 @@ repo into `install_root` from a known-good commit.
 Edit `update.repo_url` in `config.json` and run `Update-ServerSync.ps1`.
 The script runs `git remote set-url origin <new_url>` at the start of each
 update, so the change picks up automatically.
+
+---
+
+## Code-integrity controls (script tampering)
+
+ServerSync's defense against an attacker who has gained write access to the
+script files at `C:\Program Files\ServerSync\src\` is **NTFS ACLs plus the
+air-gap**, not Authenticode signing. Specifically:
+
+1. The installer (`Install-ServerSync.ps1`) sets explicit-only ACLs on
+   `InstallRoot`: `Administrators` and `SYSTEM` get FullControl; the
+   `ServiceAccount` (the run-as account) gets `ReadAndExecute` only —
+   intentionally NOT Write. Inheritance is disabled and the owner is
+   forced to `BUILTIN\Administrators`. So even though the run-as
+   account is itself a Local Administrator (required for `Disable-NetAdapter`),
+   the per-account ACL line denies write access. Removing the script
+   files therefore requires either a separate admin login or the use
+   of the Administrators group entry, both of which are auditable.
+
+2. The data root (`C:\ProgramData\ServerSync\`) and log directory have a
+   different ACL: ServiceAccount needs Write here for config edits and
+   log rollover. This is by design — config and logs are mutable; scripts
+   are not.
+
+3. The orchestrator and updater both use the `Update-ServerSync.ps1`
+   `repo_url`/`branch` flow with `update.allowed_repos` whitelist, an
+   absolute-path resolved `git.exe`, and a smoke test run via an
+   absolute-path resolved `powershell.exe` — none of which can be hijacked
+   by a malicious binary planted on `$PATH`.
+
+4. The air-gap itself is the dominant control: outside sync windows, no
+   network reaches the box, so a remote attacker cannot deliver a payload
+   to be picked up on the next run.
+
+### What about Authenticode code signing?
+
+Authenticode signing of `.ps1` files plus `Set-ExecutionPolicy AllSigned`
+is **not enforced** in this codebase. Implementing it well requires:
+
+- An organizational Code Signing certificate
+- A signing build step that produces signed scripts as release artifacts
+- A startup self-check (`Get-AuthenticodeSignature`) in the orchestrator
+  that rejects unsigned or untrusted-publisher modules
+
+If your environment already has a signing pipeline, you can layer it on
+top: sign all repo `.ps1` files before deploying to `InstallRoot`, set
+`Set-ExecutionPolicy -Scope LocalMachine AllSigned` on the air-gapped
+server, and ensure the trusted publisher is in the local certificate
+store. The codebase will continue to work — `AllSigned` is enforced by
+PowerShell itself, not by the scripts.
+
+The intentional choice not to enforce signing in code is to keep the
+codebase deployable without a PKI dependency. The ACL + air-gap controls
+above are considered sufficient for the threat model where physical /
+admin access to the box is the dominant attack vector.
 
 ---
 
