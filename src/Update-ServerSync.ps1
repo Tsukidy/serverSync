@@ -169,8 +169,14 @@ try {
         Enable-ServerSyncNics -Names $config.network.nics
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "NICs enabled"
 
-        if (-not (Wait-NetworkReady -TargetHost $config.network.ready_check_host -TimeoutSeconds $config.network.ready_timeout_seconds)) {
-            throw "Network not ready after $($config.network.ready_timeout_seconds)s (host: $($config.network.ready_check_host))"
+        $readyArgs = @{
+            TargetHost = $config.network.ready_check_host
+            TimeoutSeconds = $config.network.ready_timeout_seconds
+        }
+        if ($config.network.ready_check_port) { $readyArgs['Port'] = [int]$config.network.ready_check_port }
+        if (-not (Wait-NetworkReady @readyArgs)) {
+            $portMsg = if ($readyArgs.Port) { ":$($readyArgs.Port)" } else { '' }
+            throw "Network not ready after $($config.network.ready_timeout_seconds)s (host: $($config.network.ready_check_host)$portMsg)"
         }
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "Network ready"
     }

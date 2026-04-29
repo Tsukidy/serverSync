@@ -61,6 +61,13 @@ function Test-ServerSyncConfig {
         if (-not $Config.network.ready_check_host) {
             $errors.Add("network.ready_check_host is required")
         }
+        # ready_check_port is optional. If present must be a valid TCP port.
+        if ($null -ne $Config.network.ready_check_port) {
+            $p = $Config.network.ready_check_port
+            if ($p -lt 1 -or $p -gt 65535) {
+                $errors.Add("network.ready_check_port must be 1-65535")
+            }
+        }
     }
 
     if ($Config.retention) {

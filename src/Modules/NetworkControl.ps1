@@ -49,25 +49,53 @@ function Test-AllNicsDisabled {
 }
 
 function Wait-NetworkReady {
+    <#
+    .DESCRIPTION
+        Wait for the configured ready_check_host to be reachable, ICMP first.
+        If -Port is supplied, also verify a TCP connection to that port (e.g.,
+        SMB 445) - a stronger check because some networks filter ICMP while
+        allowing the actual sync protocol.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$TargetHost,
-        [Parameter(Mandatory)][int]$TimeoutSeconds
+        [Parameter(Mandatory)][int]$TimeoutSeconds,
+        [int]$Port
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
+        $icmpOk = $false
         try {
             if (Test-Connection -TargetName $TargetHost -Count 1 -Quiet -ErrorAction Stop) {
-                return $true
+                $icmpOk = $true
             }
         }
         catch {
-            # Test-Connection older param name on Windows PowerShell 5.1
+            # Test-Connection has different param names across PS versions.
             try {
                 if (Test-Connection -ComputerName $TargetHost -Count 1 -Quiet -ErrorAction Stop) {
-                    return $true
+                    $icmpOk = $true
                 }
             } catch {}
+        }
+
+        if ($icmpOk) {
+            if (-not $Port) { return $true }
+            # Verify TCP reachability too. A short connect timeout avoids
+            # hanging the whole readiness window on a single port probe.
+            $client = New-Object Net.Sockets.TcpClient
+            try {
+                $iar = $client.BeginConnect($TargetHost, $Port, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(2000)) {
+                    try {
+                        $client.EndConnect($iar)
+                        return $true
+                    } catch {}
+                }
+            }
+            finally {
+                $client.Close()
+            }
         }
         Start-Sleep -Seconds 1
     }
