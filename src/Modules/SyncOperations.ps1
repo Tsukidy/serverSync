@@ -3,6 +3,39 @@
     robocopy wrapper and exit code interpretation.
 #>
 
+# Allowlist for robocopy.extra_flags. Anything not on this list is rejected
+# by Test-RobocopyFlag (used by config validation).
+#
+# Excluded by design:
+#   /MIR /PURGE /MOVE /MOV    - destructive (mirror is opt-in via retention.mode='mirror')
+#   /LOG /LOG+ /UNILOG /UNILOG+ - log redirection (could overwrite config or other files)
+#   /JOB /SAVE                - reads/writes job files
+#   /S /E /XO /COPY /COPYALL  - overrides core flags we set explicitly
+$script:RobocopyAllowedExactFlags = @(
+    '/COMPRESS', '/B', '/ZB',
+    '/NS', '/NC', '/NFL', '/NDL', '/NJH', '/NJS',
+    '/V', '/X', '/TS', '/FP'
+)
+$script:RobocopyAllowedPrefixedFlags = @(
+    '/IPG:', '/MAXAGE:', '/MINAGE:', '/MAXSIZE:', '/MINSIZE:'
+)
+
+function Test-RobocopyFlag {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Flag
+    )
+    if ([string]::IsNullOrWhiteSpace($Flag)) { return $false }
+    if (-not $Flag.StartsWith('/')) { return $false }
+
+    $upper = $Flag.ToUpperInvariant()
+    if ($script:RobocopyAllowedExactFlags -contains $upper) { return $true }
+    foreach ($prefix in $script:RobocopyAllowedPrefixedFlags) {
+        if ($upper.StartsWith($prefix)) { return $true }
+    }
+    return $false
+}
+
 function ConvertFrom-RobocopyExitCode {
     [CmdletBinding()]
     param(

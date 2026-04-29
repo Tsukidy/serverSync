@@ -24,6 +24,26 @@ function New-ServerSyncLogger {
     }
 }
 
+function ConvertTo-LogSafeText {
+    <#
+    .SYNOPSIS
+        Escape characters that would let attacker-controlled values forge
+        new log lines or break line-oriented log parsers.
+    .DESCRIPTION
+        CR and LF are replaced with literal '\r' and '\n' sequences. A NUL
+        byte is replaced with '\0'. Anything else is passed through.
+
+        This is single-message-per-line defense. Aggregators that key on
+        regex like '^[\d-]+T[\d:]+(?:Z|[+-]\d{2}:\d{2}) \[(?:INFO|WARN|...)\] '
+        will no longer match injected fakes from inside a message body.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text
+    )
+    return $Text -replace "`r", '\r' -replace "`n", '\n' -replace "`0", '\0'
+}
+
 function Write-ServerSyncLog {
     [CmdletBinding()]
     param(
@@ -33,8 +53,9 @@ function Write-ServerSyncLog {
         [switch]$AlsoEventLog
     )
 
+    $safeMessage = ConvertTo-LogSafeText -Text $Message
     $ts = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
-    $line = "$ts [$Level] $Message"
+    $line = "$ts [$Level] $safeMessage"
     Add-Content -Path $Logger.LogPath -Value $line -Encoding UTF8
 
     if ($AlsoEventLog -and $Logger.EventLogSource) {
@@ -45,11 +66,13 @@ function Write-ServerSyncLog {
         }
         try {
             Write-EventLog -LogName 'Application' -Source $Logger.EventLogSource `
-                           -EventId 1000 -EntryType $eventType -Message $Message -ErrorAction Stop
+                           -EventId 1000 -EntryType $eventType -Message $safeMessage -ErrorAction Stop
         }
         catch {
-            # Event Log may not be available (non-Windows or source not registered) -- degrade silently
-            Add-Content -Path $Logger.LogPath -Value "$ts [WARN] Event Log write failed: $($_.Exception.Message)" -Encoding UTF8
+            # Event Log may not be available (non-Windows or source not registered) -- degrade silently.
+            # The exception message is itself sanitized to prevent it being a re-injection vector.
+            $safeErr = ConvertTo-LogSafeText -Text $_.Exception.Message
+            Add-Content -Path $Logger.LogPath -Value "$ts [WARN] Event Log write failed: $safeErr" -Encoding UTF8
         }
     }
 }

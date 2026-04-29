@@ -65,6 +65,21 @@ function Test-ServerSyncConfig {
         $errors.Add("email.send_on must be 'failure', 'always', or 'never'")
     }
 
+    # Validate robocopy.extra_flags against the allowlist if available.
+    # Test-RobocopyFlag is defined in SyncOperations.ps1 - if SyncOperations
+    # is not loaded (e.g. ConfigLoader-only test fixtures), this check is
+    # skipped. The orchestrator and Update-ServerSync load both modules, so
+    # production paths always validate.
+    if ($Config.robocopy -and $Config.robocopy.extra_flags) {
+        if (Get-Command -Name Test-RobocopyFlag -ErrorAction SilentlyContinue) {
+            foreach ($flag in @($Config.robocopy.extra_flags)) {
+                if (-not (Test-RobocopyFlag -Flag $flag)) {
+                    $errors.Add("robocopy.extra_flags contains disallowed flag: '$flag' (see SyncOperations.ps1 for the allowlist)")
+                }
+            }
+        }
+    }
+
     # Update section is optional; only validate fields if present
     if ($Config.PSObject.Properties.Name -contains 'update' -and $null -ne $Config.update) {
         if ($Config.update.enabled) {

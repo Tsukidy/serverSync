@@ -83,15 +83,21 @@ try {
         try {
             $cred = Get-ServerSyncCredential -TargetName $pair.credential_target
 
-            # Map SMB drive temporarily for this pair
-            $useDrive = $false
+            # Establish the SMB session via New-PSDrive -Credential. This passes
+            # the password through the SecureString in the PSCredential to the
+            # underlying Win32 logon API - it is NEVER materialized as a plain
+            # string command-line argument, so it does not appear in
+            # PowerShell ScriptBlock/Module logging, ETW, or process listings.
+            #
+            # The drive name is unique-per-pair (random suffix) so concurrent
+            # or back-to-back pairs cannot collide.
+            $driveName = "sssync_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            $drive = $null
             try {
-                if ($PSCmdlet.ShouldProcess($pair.source, 'New-SmbMapping')) {
-                    New-SmbMapping -RemotePath $pair.source `
-                        -UserName $cred.UserName `
-                        -Password $cred.GetNetworkCredential().Password `
-                        -Persistent $false -ErrorAction Stop | Out-Null
-                    $useDrive = $true
+                if ($PSCmdlet.ShouldProcess($pair.source, 'Establish SMB session via New-PSDrive')) {
+                    $drive = New-PSDrive -Name $driveName -PSProvider FileSystem `
+                        -Root $pair.source -Credential $cred -Scope Script `
+                        -ErrorAction Stop
                 }
 
                 # Resolve retention policy first so we know whether this is a mirror pair
@@ -132,8 +138,8 @@ try {
                 }
             }
             finally {
-                if ($useDrive -and (Get-SmbMapping -RemotePath $pair.source -ErrorAction SilentlyContinue)) {
-                    Remove-SmbMapping -RemotePath $pair.source -Force -ErrorAction SilentlyContinue
+                if ($drive) {
+                    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
                 }
             }
         }

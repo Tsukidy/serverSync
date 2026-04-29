@@ -68,3 +68,42 @@ Describe 'Logging - email' -Tag 'Unit' {
         (Test-ShouldSendEmail -SendOn 'never'   -HasFailures $true)  | Should -Be $false
     }
 }
+
+Describe 'Logging - log injection defense' -Tag 'Unit' {
+    BeforeEach {
+        $script:TmpDir = Join-Path ([IO.Path]::GetTempPath()) ("logging-inject-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:TmpDir | Out-Null
+    }
+    AfterEach {
+        if (Test-Path $script:TmpDir) { Remove-Item -Recurse -Force $script:TmpDir }
+    }
+
+    It 'ConvertTo-LogSafeText escapes CR LF and NUL' {
+        ConvertTo-LogSafeText -Text "hello`nworld"   | Should -Be 'hello\nworld'
+        ConvertTo-LogSafeText -Text "hello`r`nworld" | Should -Be 'hello\r\nworld'
+        ConvertTo-LogSafeText -Text "hello`0world"   | Should -Be 'hello\0world'
+    }
+
+    It 'ConvertTo-LogSafeText passes through normal text unchanged' {
+        ConvertTo-LogSafeText -Text 'normal message' | Should -Be 'normal message'
+        ConvertTo-LogSafeText -Text ''               | Should -Be ''
+    }
+
+    It 'Write-ServerSyncLog refuses to write a forged log line via injected newline' {
+        $logger = New-ServerSyncLogger -LogDirectory $script:TmpDir -Prefix 'inject'
+        # Attacker-controlled pair name that tries to inject a forged "All OK" line.
+        $injected = "Pair1`r`n2026-04-22T02:00:00+00:00 [INFO] All pairs OK"
+        Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message $injected
+
+        $content = Get-Content -Raw $logger.LogPath
+        # The escaped \r\n sequence should appear as literal text in the log.
+        $content | Should -Match '\\r\\n'
+        # The exact attack path - a fresh INFO line at the start of a line -
+        # must not exist. With escaping in place, the whole injected payload
+        # remains on the single ERROR line.
+        $lines = Get-Content -Path $logger.LogPath
+        ($lines | Where-Object { $_ -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\S* \[INFO\] All pairs OK$' }).Count | Should -Be 0
+        # And the file should contain only one logged line, not two.
+        ($lines | Where-Object { $_ -match '^\d{4}-\d{2}-\d{2}T' }).Count | Should -Be 1
+    }
+}

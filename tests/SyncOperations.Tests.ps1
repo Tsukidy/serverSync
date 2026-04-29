@@ -108,3 +108,58 @@ Describe 'SyncOperations - mirror mode' -Tag 'Unit' {
         $argString | Should -Match '/LOG\+:'
     }
 }
+
+Describe 'SyncOperations - Test-RobocopyFlag allowlist' -Tag 'Unit' {
+    It 'allows benign flags like /COMPRESS' {
+        Test-RobocopyFlag -Flag '/COMPRESS' | Should -Be $true
+    }
+
+    It 'allows prefixed flags like /IPG:50' {
+        Test-RobocopyFlag -Flag '/IPG:50' | Should -Be $true
+        Test-RobocopyFlag -Flag '/MAXAGE:30' | Should -Be $true
+    }
+
+    It 'is case-insensitive' {
+        Test-RobocopyFlag -Flag '/compress' | Should -Be $true
+        Test-RobocopyFlag -Flag '/ipg:50' | Should -Be $true
+    }
+
+    It 'rejects /MIR (mirror is opt-in via retention.mode)' {
+        Test-RobocopyFlag -Flag '/MIR' | Should -Be $false
+    }
+
+    It 'rejects /PURGE' {
+        Test-RobocopyFlag -Flag '/PURGE' | Should -Be $false
+    }
+
+    It 'rejects /MOVE and /MOV' {
+        Test-RobocopyFlag -Flag '/MOVE' | Should -Be $false
+        Test-RobocopyFlag -Flag '/MOV' | Should -Be $false
+    }
+
+    It 'rejects /LOG and /LOG+ (log redirection could overwrite files)' {
+        Test-RobocopyFlag -Flag '/LOG:C:\evil.log' | Should -Be $false
+        Test-RobocopyFlag -Flag '/LOG+:C:\evil.log' | Should -Be $false
+    }
+
+    It 'rejects /JOB and /SAVE' {
+        Test-RobocopyFlag -Flag '/JOB:foo' | Should -Be $false
+        Test-RobocopyFlag -Flag '/SAVE:bar' | Should -Be $false
+    }
+
+    It 'rejects core flags we set ourselves' {
+        Test-RobocopyFlag -Flag '/E' | Should -Be $false
+        Test-RobocopyFlag -Flag '/XO' | Should -Be $false
+        Test-RobocopyFlag -Flag '/COPY:DATSO' | Should -Be $false
+    }
+
+    It 'rejects flags not starting with /' {
+        Test-RobocopyFlag -Flag 'COMPRESS' | Should -Be $false
+        Test-RobocopyFlag -Flag '\\evil' | Should -Be $false
+    }
+
+    It 'rejects empty / whitespace input' {
+        Test-RobocopyFlag -Flag '' | Should -Be $false
+        Test-RobocopyFlag -Flag '   ' | Should -Be $false
+    }
+}
