@@ -254,9 +254,23 @@ finally {
                 if ($config.email.enabled -and $config.email.credential_target) {
                     $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
                 }
+                $adapterReport = ''
+                try {
+                    $adapterReport = (Get-NetAdapter | Format-Table Name, Status, InterfaceDescription -AutoSize | Out-String)
+                } catch {}
+                $tail = Get-LogTail -Path $logger.LogPath -MaxLines 50 -MaxBytes 16KB
+                $urgentBody = @(
+                    "Host: $env:COMPUTERNAME"
+                    "NICs may still be active after update. Investigate IMMEDIATELY."
+                    ""
+                    "--- Get-NetAdapter ---"
+                    $adapterReport
+                    "--- log tail ---"
+                    $tail
+                ) -join [Environment]::NewLine
                 Send-ServerSyncEmail -Config $config.email `
                     -Subject '[URGENT] ServerSync Update: NIC DISABLE VERIFICATION FAILED' `
-                    -Body "Host: $env:COMPUTERNAME`nNICs may still be active after update. Investigate immediately." `
+                    -Body $urgentBody `
                     -Credential $smtpCred -HasFailures $true
             } catch {
                 Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Urgent email send failed: $($_.Exception.Message)"

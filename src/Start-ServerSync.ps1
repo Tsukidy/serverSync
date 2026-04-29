@@ -176,17 +176,36 @@ finally {
         }
         if (-not $allDown) {
             Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message 'CRITICAL: NIC disable could not be verified' -AlsoEventLog
-            # Urgent email
+            # Urgent email - include adapter status snapshot and log tail so
+            # responders have actionable diagnostics rather than just
+            # 'investigate immediately'.
             try {
                 $smtpCred = $null
                 if ($config.email.enabled -and $config.email.credential_target) {
                     $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
                 }
+                $adapterReport = ''
+                try {
+                    $adapterReport = (Get-NetAdapter | Format-Table Name, Status, InterfaceDescription -AutoSize | Out-String)
+                } catch {}
+                $tail = Get-LogTail -Path $logger.LogPath -MaxLines 50 -MaxBytes 16KB
+                $urgentBody = @(
+                    "Host: $env:COMPUTERNAME"
+                    "NICs may still be active. Investigate IMMEDIATELY."
+                    ""
+                    "--- Get-NetAdapter ---"
+                    $adapterReport
+                    "--- log tail ---"
+                    $tail
+                ) -join [Environment]::NewLine
                 Send-ServerSyncEmail -Config $config.email `
                     -Subject '[URGENT] ServerSync: NIC DISABLE VERIFICATION FAILED' `
-                    -Body "Host: $env:COMPUTERNAME`nNICs may still be active. Investigate immediately." `
+                    -Body $urgentBody `
                     -Credential $smtpCred -HasFailures $true
-            } catch {}
+            }
+            catch {
+                Write-ServerSyncLog -Logger $logger -Level 'ERROR' -Message "Urgent email send failed: $($_.Exception.Message)"
+            }
             exit 3
         }
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message 'NICs verified disabled'
@@ -195,7 +214,8 @@ finally {
     Remove-OldLogFiles -LogDirectory $config.logging.log_directory -RetentionDays $config.logging.log_retention_days
 }
 
-# Summary email
+# Summary email - send a tail of the log, not the entire file. Bounded body
+# size keeps SMTP payloads reasonable and reduces accidental data exposure.
 try {
     if ($config.email.enabled) {
         $smtpCred = $null
@@ -203,9 +223,10 @@ try {
             $smtpCred = Get-ServerSyncCredential -TargetName $config.email.credential_target
         }
         $status = if ($hasFailures) { 'FAILURES' } else { 'OK' }
+        $body = Get-LogTail -Path $logger.LogPath -MaxLines 200 -MaxBytes 64KB
         Send-ServerSyncEmail -Config $config.email `
             -Subject "[ServerSync] $status on $env:COMPUTERNAME" `
-            -Body (Get-Content -Raw $logger.LogPath) `
+            -Body $body `
             -Credential $smtpCred -HasFailures $hasFailures
     }
 } catch {

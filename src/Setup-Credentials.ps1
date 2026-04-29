@@ -26,7 +26,7 @@ $secure = Read-Host 'Password' -AsSecureString
 $existing = Get-StoredCredential -Target $Target
 if ($existing) {
     $answer = Read-Host "Credential '$Target' exists. Overwrite? (y/N)"
-    if ($answer -ne 'y') { exit 0 }
+    if ($answer -notmatch '^[Yy]') { exit 0 }
     Remove-StoredCredential -Target $Target
 }
 
