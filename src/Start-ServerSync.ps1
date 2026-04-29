@@ -68,8 +68,12 @@ $nicsEnabled = $false
 
 try {
     if ($PSCmdlet.ShouldProcess('NICs', "Enable $($config.network.nics -join ', ')")) {
-        Enable-ServerSyncNics -Names $config.network.nics
+        # Set $nicsEnabled BEFORE calling Enable-ServerSyncNics. If Enable
+        # partially succeeds (some NICs up, then one throws on Group Policy),
+        # the finally block must still run the disable + verify - otherwise
+        # a partially-enabled state would never be torn down.
         $nicsEnabled = $true
+        Enable-ServerSyncNics -Names $config.network.nics
         Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "NICs enabled"
 
         if (-not (Wait-NetworkReady -TargetHost $config.network.ready_check_host -TimeoutSeconds $config.network.ready_timeout_seconds)) {

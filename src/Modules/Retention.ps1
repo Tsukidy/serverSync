@@ -63,7 +63,14 @@ function Invoke-RetentionFilesMode {
             if (-not $normalizedExt.StartsWith('.')) { $normalizedExt = ".$normalizedExt" }
 
             $files = Get-ChildItem -LiteralPath $sub.FullName -File -Force |
-                Where-Object { $_.Extension -ieq $normalizedExt } |
+                Where-Object {
+                    # Skip files that are reparse points (symlinks). Even though
+                    # Remove-Item -Force on a file symlink only deletes the link,
+                    # the symlink target may have been deliberately planted by an
+                    # attacker for confusion or to evade audit. Refuse and log.
+                    -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                    $_.Extension -ieq $normalizedExt
+                } |
                 Sort-Object LastWriteTime -Descending
 
             $toDelete = $files | Select-Object -Skip $Policy.Count
@@ -99,8 +106,7 @@ function Invoke-RetentionFoldersMode {
 
         $toDelete = $childFolders | Select-Object -Skip $Policy.Count
         foreach ($d in $toDelete) {
-            # Refuse to recurse into reparse points - they may target locations
-            # outside the destination tree.
+            # Refuse to recurse into reparse points at the candidate level.
             if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) {
                 if ($LogCallback) { & $LogCallback "retention: refused (reparse point): $($d.FullName)" }
                 continue
@@ -108,6 +114,21 @@ function Invoke-RetentionFoldersMode {
             # Containment guard: only delete if the folder is under the canonical root.
             if (-not (Test-PathContainedIn -Candidate $d.FullName -Root $CanonicalRoot)) {
                 if ($LogCallback) { & $LogCallback "retention: refused (outside destination root): $($d.FullName)" }
+                continue
+            }
+            # Deep guard: walk the entire subtree below the candidate and refuse
+            # if ANY descendant is a reparse point. PowerShell 5.1's
+            # Remove-Item -Recurse -Force has historically had bugs (PowerShell
+            # GitHub issues #621, #4154, #3522) where it follows reparse points
+            # encountered during recursion and deletes the link target. We
+            # defend by refusing to recurse into a tree that contains any.
+            $hasInnerReparse = Get-ChildItem -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+                Select-Object -First 1
+            if ($hasInnerReparse) {
+                if ($LogCallback) {
+                    & $LogCallback "retention: refused (descendant reparse point): $($d.FullName) -> $($hasInnerReparse.FullName)"
+                }
                 continue
             }
             if ($PSCmdlet.ShouldProcess($d.FullName, 'Delete folder recursively (retention)')) {

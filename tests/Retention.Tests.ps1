@@ -269,4 +269,61 @@ Describe 'Retention - containment + reparse-point guards' -Tag 'Unit' {
         Test-Path -LiteralPath $candidate.FullName | Should -Be $true
         ($logged -join ' ') | Should -Match 'refused.*reparse'
     }
+
+    It 'Invoke-RetentionFilesMode skips reparse-point files (symlinks)' {
+        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+            Set-ItResult -Skipped -Because 'reparse points are Windows-specific'
+            return
+        }
+
+        $sub = New-Item -ItemType Directory -Path (Join-Path $script:TmpRoot 'sub')
+        $real1 = New-Item -ItemType File -Path (Join-Path $sub 'real-1.TIB'); $real1.LastWriteTime = (Get-Date).AddDays(-1)
+        $real2 = New-Item -ItemType File -Path (Join-Path $sub 'real-2.TIB'); $real2.LastWriteTime = (Get-Date).AddDays(-2)
+        $real3 = New-Item -ItemType File -Path (Join-Path $sub 'real-3.TIB'); $real3.LastWriteTime = (Get-Date).AddDays(-3)
+
+        # Synthesize a "symlink" file by toggling its ReparsePoint flag in
+        # Attributes. This exercises the same Where-Object -band check the
+        # production code uses, without needing real symlink-creation rights.
+        $fake = New-Item -ItemType File -Path (Join-Path $sub 'fake-symlink.TIB')
+        $fake.LastWriteTime = (Get-Date).AddDays(-10)
+        $fake.Attributes = $fake.Attributes -bor [IO.FileAttributes]::ReparsePoint
+
+        $policy = [PSCustomObject]@{ Mode='files'; Count=2; Extensions=@('.TIB') }
+        $logged = New-Object System.Collections.Generic.List[string]
+        $cb = { param($msg) $logged.Add($msg) }
+
+        Invoke-RetentionFilesMode -Subfolders @($sub) -Policy $policy -CanonicalRoot $script:TmpRoot -LogCallback $cb
+
+        # The 2 newest real files survive, the 3rd-newest real file is deleted,
+        # and the (older) symlink is left alone because it was filtered out
+        # before retention even considered it as a candidate.
+        Test-Path -LiteralPath $real1.FullName | Should -Be $true
+        Test-Path -LiteralPath $real2.FullName | Should -Be $true
+        Test-Path -LiteralPath $real3.FullName | Should -Be $false
+        Test-Path -LiteralPath $fake.FullName  | Should -Be $true
+    }
+
+    It 'Invoke-RetentionFoldersMode refuses recurse-delete when a descendant is a reparse point' {
+        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+            Set-ItResult -Skipped -Because 'reparse points are Windows-specific'
+            return
+        }
+
+        $sub = New-Item -ItemType Directory -Path (Join-Path $script:TmpRoot 'sub')
+        $candidate = New-Item -ItemType Directory -Path (Join-Path $sub 'old-run')
+        $candidate.LastWriteTime = (Get-Date).AddDays(-10)
+        # Place a reparse-point file two levels deep inside the candidate.
+        $deep = New-Item -ItemType Directory -Path (Join-Path $candidate 'deep')
+        $hostile = New-Item -ItemType File -Path (Join-Path $deep 'hostile.dat')
+        $hostile.Attributes = $hostile.Attributes -bor [IO.FileAttributes]::ReparsePoint
+
+        $policy = [PSCustomObject]@{ Mode='folders'; Count=0 }
+        $logged = New-Object System.Collections.Generic.List[string]
+        $cb = { param($msg) $logged.Add($msg) }
+
+        Invoke-RetentionFoldersMode -Subfolders @($sub) -Policy $policy -CanonicalRoot $script:TmpRoot -LogCallback $cb
+
+        Test-Path -LiteralPath $candidate.FullName | Should -Be $true
+        ($logged -join ' ') | Should -Match 'descendant reparse'
+    }
 }
