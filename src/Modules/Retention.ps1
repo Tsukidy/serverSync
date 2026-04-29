@@ -16,11 +16,11 @@ function Invoke-Retention {
         [scriptblock]$LogCallback
     )
 
-    if (-not (Test-Path -Path $DestinationRoot -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $DestinationRoot -PathType Container)) {
         return  # nothing to do
     }
 
-    $subfolders = Get-ChildItem -Path $DestinationRoot -Directory -Force
+    $subfolders = Get-ChildItem -LiteralPath $DestinationRoot -Directory -Force
 
     switch ($Policy.Mode) {
         'files'   { Invoke-RetentionFilesMode   -Subfolders $subfolders -Policy $Policy -LogCallback $LogCallback }
@@ -42,7 +42,7 @@ function Invoke-RetentionFilesMode {
             $normalizedExt = $ext
             if (-not $normalizedExt.StartsWith('.')) { $normalizedExt = ".$normalizedExt" }
 
-            $files = Get-ChildItem -Path $sub.FullName -File -Force |
+            $files = Get-ChildItem -LiteralPath $sub.FullName -File -Force |
                 Where-Object { $_.Extension -ieq $normalizedExt } |
                 Sort-Object LastWriteTime -Descending
 
@@ -68,7 +68,7 @@ function Invoke-RetentionFoldersMode {
     )
 
     foreach ($sub in $Subfolders) {
-        $childFolders = Get-ChildItem -Path $sub.FullName -Directory -Force |
+        $childFolders = Get-ChildItem -LiteralPath $sub.FullName -Directory -Force |
             Sort-Object LastWriteTime -Descending
 
         $toDelete = $childFolders | Select-Object -Skip $Policy.Count

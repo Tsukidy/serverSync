@@ -39,7 +39,10 @@ function Test-AllNicsDisabled {
     )
     foreach ($n in $Names) {
         $adapter = Get-NetAdapter -Name $n -ErrorAction SilentlyContinue
-        if (-not $adapter) { continue }  # missing adapter treated as disabled
+        # Missing adapter is a verification failure: a typo or rename in
+        # config would otherwise silently pass and defeat the most
+        # security-critical invariant of the system.
+        if (-not $adapter) { return $false }
         if ($adapter.Status -ne 'Disabled') { return $false }
     }
     return $true

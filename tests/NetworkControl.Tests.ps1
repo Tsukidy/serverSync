@@ -42,6 +42,15 @@ Describe 'NetworkControl - enable/disable' -Tag 'Unit' {
         } -ParameterFilter { $Name }
         (Test-AllNicsDisabled -Names @('Ethernet','Ethernet 2')) | Should -Be $false
     }
+
+    It 'Test-AllNicsDisabled returns $false when an adapter does not exist (typo or rename)' {
+        # Critical: a typo in config used to silently pass verification.
+        Mock Get-NetAdapter {
+            if ($Name -eq 'Ethernet') { [PSCustomObject]@{ Name=$Name; Status='Disabled' } }
+            else { $null }   # the missing adapter case
+        } -ParameterFilter { $Name }
+        (Test-AllNicsDisabled -Names @('Ethernet','EthernetX-typo')) | Should -Be $false
+    }
 }
 
 Describe 'NetworkControl - readiness' -Tag 'Unit' {
