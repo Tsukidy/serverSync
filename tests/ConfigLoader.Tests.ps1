@@ -308,4 +308,98 @@ Describe 'ConfigLoader' -Tag 'Unit' {
             $result.Valid | Should -Be $true
         }
     }
+
+    Context 'Test-ServerSyncConfig - shape and value hardening' {
+        It 'rejects a destination containing parent traversal' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.folder_pairs[0].destination = 'D:\Backups\..\..\Windows'
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'parent-traversal'
+        }
+
+        It 'rejects a destination containing wildcards' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.folder_pairs[0].destination = 'D:\Backups\*'
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'wildcard'
+        }
+
+        It 'rejects a destination that is not an absolute drive-letter path' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.folder_pairs[0].destination = '\\remote\share\dest'
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'drive-letter'
+        }
+
+        It 'rejects a credential_target with shell-special characters' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.folder_pairs[0].credential_target = "evil`"; calc"
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'credential_target'
+        }
+
+        It 'rejects a tag with shell-special characters' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.folder_pairs[0] | Add-Member -MemberType NoteProperty -Name 'tags' -Value @('default; calc') -Force
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'tag.*invalid characters'
+        }
+
+        It 'rejects retention.count = 0 (falsy short-circuit was a bug)' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.folder_pairs[0] | Add-Member -MemberType NoteProperty -Name 'retention' `
+                -Value ([PSCustomObject]@{ mode='files'; count=0; extensions=@('.TIB') }) -Force
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'retention.count'
+        }
+
+        It 'rejects retention.extensions with bogus values' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.folder_pairs[0] | Add-Member -MemberType NoteProperty -Name 'retention' `
+                -Value ([PSCustomObject]@{ mode='files'; count=3; extensions=@('.TIB','. evil') }) -Force
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'retention.extensions'
+        }
+
+        It 'rejects nics declared as a bare string instead of an array' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.network.nics = 'Ethernet'   # bare string, not array
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'nics must be an array'
+        }
+
+        It 'rejects email.to that is not a non-empty array of valid addresses when enabled' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.email.enabled = $true
+            $config.email.smtp_server = 'mail.example.com'
+            $config.email.to = @('not-an-email')
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'email.to.*invalid address'
+        }
+
+        It 'rejects garbage send_on even when email.enabled is false' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.email.send_on = 'whenever'
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'send_on'
+        }
+
+        It 'requires retention.default_mode' {
+            $config = Read-ServerSyncConfig -Path (Join-Path $script:FixturesDir 'config-valid-minimal.json')
+            $config.retention.PSObject.Properties.Remove('default_mode')
+            $result = Test-ServerSyncConfig -Config $config
+            $result.Valid | Should -Be $false
+            ($result.Errors -join ' ') | Should -Match 'default_mode'
+        }
+    }
 }
