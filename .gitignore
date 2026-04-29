@@ -24,3 +24,6 @@ Thumbs.db
 
 # Git worktrees (project-local isolated workspaces)
 .worktrees/
+
+# Script Folder
+.scripts/
