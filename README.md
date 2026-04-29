@@ -20,6 +20,7 @@ Already running and need to operate, configure, or troubleshoot?
 - `src/ServerSync-Manager.ps1` — WinForms admin GUI (config / logs / credentials / schedule tabs)
 - `src/Setup-Credentials.ps1` — CLI credential setup helper
 - `src/Install-ServerSync.ps1` — installer (directories, ACLs, Event Log source, Task Scheduler folder)
+- `src/Update-ServerSync.ps1` — admin-triggered git-based update with rollback safety
 - `src/Modules/*.ps1` — modules dot-sourced by the orchestrator and GUI
 - `tests/*.Tests.ps1` — Pester tests (cross-platform compatible)
 - `config/config.sample.json` — sample config
@@ -49,7 +50,9 @@ powershell -File src\Start-ServerSync.ps1 -WhatIf
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — full deployment and operations
   guide: account model, config reference, scheduling, daily ops, troubleshooting.
 - **[docs/superpowers/specs/2026-04-22-serversync-design.md](docs/superpowers/specs/2026-04-22-serversync-design.md)**
-  — full design specification.
+  — full design specification (v1).
+- **[docs/superpowers/specs/2026-04-29-serversync-v2-design.md](docs/superpowers/specs/2026-04-29-serversync-v2-design.md)**
+  — v2 amendment: mirror retention mode and the in-place update mechanism.
 - **[docs/superpowers/plans/2026-04-22-serversync-implementation.md](docs/superpowers/plans/2026-04-22-serversync-implementation.md)**
   — implementation plan (history of how the code came together).
 

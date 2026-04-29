@@ -262,6 +262,51 @@ the log = success.
 - Backup files pulled to your air-gapped destination, with per-pair
   retention pruning the old copies
 
+## Updating
+
+To update the install in place, opt in via `config.json`:
+
+```json
+"update": {
+    "enabled": true,
+    "repo_url": "https://github.com/Tsukidy/serverSync.git",
+    "branch": "main",
+    "install_root": "C:\\Program Files\\ServerSync",
+    "backup_tag_count": 3
+}
+```
+
+Then run (as Local Administrator, from anywhere):
+
+```powershell
+.\src\Update-ServerSync.ps1 -ConfigPath 'C:\ProgramData\ServerSync\config.json'
+```
+
+What it does:
+
+- Enables NICs (with the same verify-disable contract as the orchestrator)
+- Captures a rollback git tag (`serversync-pre-update-<timestamp>`)
+- Runs `git fetch` + `git reset --hard origin/<branch>`
+- Disables NICs
+- Runs `Start-ServerSync.ps1 -ValidateConfig` as a smoke test
+- **If the smoke test fails:** automatically rolls back to the captured tag
+  and sends an urgent email
+- Prunes old rollback tags (keeps the newest `backup_tag_count`)
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Update succeeded; smoke test passed |
+| 2 | Refused (update.enabled=false, install_root not a git repo, etc.) |
+| 3 | NIC disable verification failed — investigate immediately |
+| 4 | Update applied, smoke test failed, rolled back successfully |
+| 5 | Update applied, smoke test failed, AND rollback failed — page someone |
+
+To skip the interactive confirmation, use `-Force`. **The `update` section is
+opt-in:** if `enabled` is left `false` (the default), `Update-ServerSync.ps1`
+refuses to run.
+
 ## Troubleshooting common install issues
 
 See [DEPLOYMENT.md → Troubleshooting](DEPLOYMENT.md#troubleshooting). The

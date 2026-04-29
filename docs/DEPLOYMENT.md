@@ -277,17 +277,37 @@ where the pulled files go.
 **`folder_pairs[].credential_target`** — must match a target name from
 [Storing source-server credentials](#storing-source-server-credentials).
 
-**`folder_pairs[].retention`** — per-pair retention. Two modes:
+**`folder_pairs[].retention`** — per-pair retention. Three modes:
 
 ```json
 { "mode": "files", "extensions": [".TIB"], "count": 5 }
 ```
+Keep N newest files matching extensions, per immediate subfolder.
 
 ```json
 { "mode": "folders", "count": 7 }
 ```
+Keep N newest subfolders, per immediate subfolder.
 
-If omitted, the pair inherits `retention.default_*` from the top level.
+```json
+{ "mode": "mirror" }
+```
+**Mirror mode** — robocopy uses `/MIR`, making the destination match the source
+exactly. The destination tracks source's retention: if the source removes a
+file, the next sync removes it from the destination too. No `count` or
+`extensions` needed (ignored if present).
+
+> **Trade-off of mirror mode:** Simpler maintenance (only one retention
+> policy to manage, on the source side) but the air-gapped copy becomes
+> less effective as a "last copy of record" defense — a compromised or
+> buggy source that wipes its own backups will cause the air-gapped copy
+> to wipe too on the next sync. Use mirror mode for sources where source-side
+> retention is what you want everywhere, and use `files`/`folders` mode for
+> sources where the air-gapped server should keep more (or different)
+> copies than the source itself.
+
+If `retention` is omitted entirely, the pair inherits `retention.default_*`
+from the top level.
 
 **`folder_pairs[].tags`** — controls when this pair runs:
 
@@ -491,6 +511,95 @@ Restore the tags to re-enable it.
    overwrite when prompted
 3. Run `Start-ServerSync.ps1 -Tag <something>` or wait for next scheduled run
    to verify
+
+### Updating the install in place
+
+ServerSync ships an admin-triggered update mechanism (`Update-ServerSync.ps1`).
+It is **opt-in** — disabled by default — and never invoked by the orchestrator
+or scheduled tasks.
+
+#### One-time setup
+
+Edit `config.json` and add (or enable) the `update` section:
+
+```json
+"update": {
+    "enabled": true,
+    "repo_url": "https://github.com/Tsukidy/serverSync.git",
+    "branch": "main",
+    "install_root": "C:\\Program Files\\ServerSync",
+    "backup_tag_count": 3
+}
+```
+
+`install_root` must be a git working directory (it will be if you cloned the
+repo there during install per `INSTALL.md`).
+
+#### Running an update
+
+From any Local Administrator account on the air-gapped server:
+
+```powershell
+& 'C:\Program Files\ServerSync\src\Update-ServerSync.ps1' `
+    -ConfigPath 'C:\ProgramData\ServerSync\config.json'
+```
+
+You will be prompted to confirm. Pass `-Force` to skip the prompt.
+
+What it does:
+
+1. Validates config and refuses to run if `update.enabled = false`
+2. Captures a rollback git tag (`serversync-pre-update-<UTC timestamp>`)
+3. Enables NICs (with the same verify-disable contract as the orchestrator)
+4. `git fetch origin --tags --prune` then `git reset --hard origin/<branch>`
+5. Disables NICs and verifies they're down
+6. Runs `Start-ServerSync.ps1 -ValidateConfig` as a smoke test
+7. **If the smoke test fails:** automatically rolls back to the captured tag
+8. Prunes old rollback tags (keeps the newest `backup_tag_count`)
+
+Configuration files (`config.json`), logs, and credentials are never touched
+by an update — they live outside `install_root`.
+
+#### Update exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Update succeeded; smoke test passed; new code is live |
+| 2 | Refused before any side effects (config invalid, `enabled=false`, install_root not a git repo) |
+| 3 | Critical: NIC disable verification failed (same as orchestrator) |
+| 4 | Update applied, smoke test failed, **rollback succeeded** — old code is live |
+| 5 | Update applied, smoke test failed, **rollback also failed** — install state unknown |
+
+#### Recovering from exit code 4
+
+A clean automatic rollback. The previous code is back in place. Investigate
+what made the new commit fail the smoke test (check the most recent
+`update-*.log`) and decide whether the upstream commit needs a fix or your
+local config has drifted.
+
+#### Recovering from exit code 5
+
+This means the update was partially applied, the smoke test failed, AND the
+attempted rollback also failed. The install is in an unknown state. Manual
+recovery:
+
+```powershell
+cd 'C:\Program Files\ServerSync'
+git status                               # see where it is
+git tag --list 'serversync-pre-update-*' # see rollback points
+git reset --hard <newest-rollback-tag>   # manual rollback
+git status                               # verify clean
+```
+
+Then run `Start-ServerSync.ps1 -ValidateConfig` to confirm the install is
+working again. If `git reset` itself fails, you may need to re-clone the
+repo into `install_root` from a known-good commit.
+
+#### Changing the upstream repo URL
+
+Edit `update.repo_url` in `config.json` and run `Update-ServerSync.ps1`.
+The script runs `git remote set-url origin <new_url>` at the start of each
+update, so the change picks up automatically.
 
 ---
 

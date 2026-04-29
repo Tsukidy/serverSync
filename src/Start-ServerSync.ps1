@@ -94,6 +94,14 @@ try {
                     $useDrive = $true
                 }
 
+                # Resolve retention policy first so we know whether this is a mirror pair
+                $policy = Resolve-RetentionPolicy -Pair $pair -Defaults $config.retention
+                $isMirror = ($policy.Mode -eq 'mirror')
+
+                if ($isMirror) {
+                    Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  robocopy MIRROR mode - destination will match source exactly, including any deletions on source side"
+                }
+
                 $result = Invoke-RobocopySync -Source $pair.source `
                     -Destination $pair.destination `
                     -Threads $config.robocopy.threads `
@@ -101,6 +109,7 @@ try {
                     -RetryWaitSeconds $config.robocopy.retry_wait_seconds `
                     -LogFile $logger.LogPath `
                     -ExtraFlags $config.robocopy.extra_flags `
+                    -Mirror:$isMirror `
                     -WhatIf:$WhatIfPreference
 
                 Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  robocopy exit $($result.ExitCode): $($result.Description)"
@@ -111,12 +120,16 @@ try {
                     continue
                 }
 
-                # Retention
-                $policy = Resolve-RetentionPolicy -Pair $pair -Defaults $config.retention
-                Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  retention: mode=$($policy.Mode) count=$($policy.Count)"
-                $cb = { param($msg) Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  $msg" }
-                Invoke-Retention -DestinationRoot $pair.destination -Policy $policy `
-                    -LogCallback $cb -WhatIf:$WhatIfPreference
+                # Retention (skipped for mirror — robocopy /PURGE already handled deletion)
+                if ($isMirror) {
+                    Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  retention: skipped (mirror mode - robocopy /PURGE handled deletion)"
+                }
+                else {
+                    Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  retention: mode=$($policy.Mode) count=$($policy.Count)"
+                    $cb = { param($msg) Write-ServerSyncLog -Logger $logger -Level 'INFO' -Message "  $msg" }
+                    Invoke-Retention -DestinationRoot $pair.destination -Policy $policy `
+                        -LogCallback $cb -WhatIf:$WhatIfPreference
+                }
             }
             finally {
                 if ($useDrive -and (Get-SmbMapping -RemotePath $pair.source -ErrorAction SilentlyContinue)) {

@@ -46,16 +46,20 @@ function Build-RobocopyArgs {
         [Parameter(Mandatory)][int]$Retries,
         [Parameter(Mandatory)][int]$RetryWaitSeconds,
         [Parameter(Mandatory)][string]$LogFile,
-        [string[]]$ExtraFlags = @()
+        [string[]]$ExtraFlags = @(),
+        [switch]$Mirror
     )
+
+    # In mirror mode, /MIR replaces /E (and adds /PURGE).
+    # /XO is dropped because mirror should overwrite older destination files.
+    $copyMode = if ($Mirror) { @('/MIR') } else { @('/E', '/XO') }
 
     $robocopyArgs = @(
         $Source
         $Destination
-        '/E'
+    ) + $copyMode + @(
         '/Z'
         '/COPY:DAT'
-        '/XO'
         "/R:$Retries"
         "/W:$RetryWaitSeconds"
         "/MT:$Threads"
@@ -75,7 +79,8 @@ function Invoke-RobocopySync {
         [Parameter(Mandatory)][int]$Retries,
         [Parameter(Mandatory)][int]$RetryWaitSeconds,
         [Parameter(Mandatory)][string]$LogFile,
-        [string[]]$ExtraFlags = @()
+        [string[]]$ExtraFlags = @(),
+        [switch]$Mirror
     )
 
     if (-not (Test-Path -Path $Destination -PathType Container)) {
@@ -86,9 +91,10 @@ function Invoke-RobocopySync {
 
     $robocopyArgs = Build-RobocopyArgs -Source $Source -Destination $Destination `
         -Threads $Threads -Retries $Retries -RetryWaitSeconds $RetryWaitSeconds `
-        -LogFile $LogFile -ExtraFlags $ExtraFlags
+        -LogFile $LogFile -ExtraFlags $ExtraFlags -Mirror:$Mirror
 
-    if ($PSCmdlet.ShouldProcess("$Source -> $Destination", 'robocopy')) {
+    $action = if ($Mirror) { 'robocopy /MIR' } else { 'robocopy' }
+    if ($PSCmdlet.ShouldProcess("$Source -> $Destination", $action)) {
         $process = Start-Process -FilePath 'robocopy' -ArgumentList $robocopyArgs -Wait -PassThru -NoNewWindow
         return (ConvertFrom-RobocopyExitCode -ExitCode $process.ExitCode)
     }

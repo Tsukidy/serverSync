@@ -30,6 +30,13 @@
     "to": ["sysadmin@company.local"],
     "send_on": "failure"
   },
+  "update": {
+    "enabled": false,
+    "repo_url": "https://github.com/Tsukidy/serverSync.git",
+    "branch": "main",
+    "install_root": "C:\\Program Files\\ServerSync",
+    "backup_tag_count": 3
+  },
   "folder_pairs": [
     {
       "name": "ExampleServerA",
@@ -38,6 +45,14 @@
       "credential_target": "ServerSync-Backup01",
       "retention": { "mode": "files", "extensions": [".TIB"], "count": 5 },
       "tags": ["default", "daily"]
+    },
+    {
+      "name": "ExampleMirrorPair",
+      "source": "\\\\backup02.internal.lan\\Backups\\AppSrv",
+      "destination": "D:\\AirgappedBackups\\AppSrv",
+      "credential_target": "ServerSync-Backup02",
+      "retention": { "mode": "mirror" },
+      "tags": ["weekly"]
     }
   ]
 }

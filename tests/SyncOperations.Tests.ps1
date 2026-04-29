@@ -66,3 +66,45 @@ Describe 'SyncOperations - argument building' -Tag 'Unit' {
         $args[1] | Should -Be 'D:\d'
     }
 }
+
+Describe 'SyncOperations - mirror mode' -Tag 'Unit' {
+    It 'Build-RobocopyArgs -Mirror includes /MIR' {
+        $args = Build-RobocopyArgs -Source '\\src\s' -Destination 'D:\d' `
+            -Threads 6 -Retries 3 -RetryWaitSeconds 10 -LogFile 'C:\l.log' -Mirror
+        ($args -join ' ') | Should -Match '/MIR'
+    }
+
+    It 'Build-RobocopyArgs -Mirror omits /E (redundant with /MIR)' {
+        $args = Build-RobocopyArgs -Source '\\src\s' -Destination 'D:\d' `
+            -Threads 6 -Retries 3 -RetryWaitSeconds 10 -LogFile 'C:\l.log' -Mirror
+        # /E should not appear as a standalone arg (would be wrong; /MIR includes it)
+        $args | Should -Not -Contain '/E'
+    }
+
+    It 'Build-RobocopyArgs -Mirror omits /XO' {
+        $args = Build-RobocopyArgs -Source '\\src\s' -Destination 'D:\d' `
+            -Threads 6 -Retries 3 -RetryWaitSeconds 10 -LogFile 'C:\l.log' -Mirror
+        $args | Should -Not -Contain '/XO'
+    }
+
+    It 'Build-RobocopyArgs without -Mirror keeps /E and /XO and omits /MIR' {
+        $args = Build-RobocopyArgs -Source '\\src\s' -Destination 'D:\d' `
+            -Threads 6 -Retries 3 -RetryWaitSeconds 10 -LogFile 'C:\l.log'
+        $args | Should -Contain '/E'
+        $args | Should -Contain '/XO'
+        $args | Should -Not -Contain '/MIR'
+    }
+
+    It 'Build-RobocopyArgs -Mirror still includes the standard non-copy-mode flags' {
+        $args = Build-RobocopyArgs -Source '\\src\s' -Destination 'D:\d' `
+            -Threads 6 -Retries 3 -RetryWaitSeconds 10 -LogFile 'C:\l.log' -Mirror
+        $argString = $args -join ' '
+        $argString | Should -Match '/Z'
+        $argString | Should -Match '/COPY:DAT'
+        $argString | Should -Match '/R:3'
+        $argString | Should -Match '/W:10'
+        $argString | Should -Match '/MT:6'
+        $argString | Should -Match '/NP'
+        $argString | Should -Match '/LOG\+:'
+    }
+}

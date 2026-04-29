@@ -52,8 +52,8 @@ function Test-ServerSyncConfig {
 
     if ($Config.retention) {
         if ($Config.retention.default_mode -and
-            @('files','folders') -notcontains $Config.retention.default_mode) {
-            $errors.Add("retention.default_mode must be 'files' or 'folders'")
+            @('files','folders','mirror') -notcontains $Config.retention.default_mode) {
+            $errors.Add("retention.default_mode must be 'files', 'folders', or 'mirror'")
         }
         if ($Config.retention.default_count -lt 1) {
             $errors.Add("retention.default_count must be >= 1")
@@ -63,6 +63,31 @@ function Test-ServerSyncConfig {
     if ($Config.email -and $Config.email.enabled -and
         @('failure','always','never') -notcontains $Config.email.send_on) {
         $errors.Add("email.send_on must be 'failure', 'always', or 'never'")
+    }
+
+    # Update section is optional; only validate fields if present
+    if ($Config.PSObject.Properties.Name -contains 'update' -and $null -ne $Config.update) {
+        if ($Config.update.enabled) {
+            if (-not $Config.update.repo_url) {
+                $errors.Add("update.repo_url is required when update.enabled is true")
+            }
+            elseif ($Config.update.repo_url -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://' -and
+                    $Config.update.repo_url -notmatch '^git@') {
+                $errors.Add("update.repo_url must be a URL (https://...) or SSH form (git@...)")
+            }
+            if (-not $Config.update.branch) {
+                $errors.Add("update.branch is required when update.enabled is true")
+            }
+            elseif ($Config.update.branch -match '\s') {
+                $errors.Add("update.branch must not contain whitespace")
+            }
+            if (-not $Config.update.install_root) {
+                $errors.Add("update.install_root is required when update.enabled is true")
+            }
+            if ($Config.update.backup_tag_count -and $Config.update.backup_tag_count -lt 1) {
+                $errors.Add("update.backup_tag_count must be >= 1")
+            }
+        }
     }
 
     if ($Config.folder_pairs) {
@@ -80,8 +105,8 @@ function Test-ServerSyncConfig {
             }
 
             if ($pair.retention) {
-                if ($pair.retention.mode -and @('files','folders') -notcontains $pair.retention.mode) {
-                    $errors.Add("pair '$n' retention.mode must be 'files' or 'folders'")
+                if ($pair.retention.mode -and @('files','folders','mirror') -notcontains $pair.retention.mode) {
+                    $errors.Add("pair '$n' retention.mode must be 'files', 'folders', or 'mirror'")
                 }
                 if ($pair.retention.count -and $pair.retention.count -lt 1) {
                     $errors.Add("pair '$n' retention.count must be >= 1")
