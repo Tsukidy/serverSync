@@ -21,3 +21,6 @@ Thumbs.db
 
 # Claude Code project-local settings (may contain host-specific permissions)
 .claude/settings.local.json
+
+# Git worktrees (project-local isolated workspaces)
+.worktrees/
